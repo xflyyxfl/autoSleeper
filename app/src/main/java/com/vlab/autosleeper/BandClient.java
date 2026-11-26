@@ -41,6 +41,8 @@ public class BandClient {
     public static final UUID CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
     public static final byte CMD_HEART_RATE = 0x16;
+    /** 认证/解锁帧。连接后必须先发这一条，否则手表会静默丢弃后续所有业务命令。 */
+    public static final byte[] CMD_UNLOCK = new byte[]{0x20, 0x01};
 
     private final Context ctx;
     private final String address;
@@ -53,6 +55,7 @@ public class BandClient {
     private CountDownLatch connectedLatch;
     private CountDownLatch readyLatch;
     private volatile boolean ready;
+    private volatile boolean authSeen;
 
     public BandClient(Context ctx, String address, Listener listener) {
         this.ctx = ctx.getApplicationContext();
@@ -112,6 +115,9 @@ public class BandClient {
                         d.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
                         g.writeDescriptor(d);
                     }
+                } else {
+                    // 没有 CCCD 描述符时没有回调，直接在这里解锁
+                    writeCommand(CMD_UNLOCK);
                 }
             } catch (Throwable t) {
                 state("开启通知异常: " + t.getMessage());
@@ -119,6 +125,15 @@ public class BandClient {
             ready = true;
             state("通道就绪");
             releaseReady();
+        }
+
+        @Override
+        public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d, int status) {
+            if (d != null && CCCD.equals(d.getCharacteristic().getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
+                // 关键：通知开关生效后立刻发解锁帧，手表收到才开始处理业务命令
+                writeCommand(CMD_UNLOCK);
+                state("已解锁命令通道（20 01）");
+            }
         }
 
         @Override
@@ -166,6 +181,13 @@ public class BandClient {
         } catch (Throwable ignored) {
         }
         int cmd = d[0] & 0xFF;
+        // 20 01 的回应是 20 04 <code>：1=已绑定  3=等待中  4=手表等待确认
+        if (cmd == 0x20 && d.length >= 3 && d[1] == 0x04) {
+            int code = d[2] & 0xFF;
+            authSeen = true;
+            state("认证返回码 " + code + (code == 1 ? "（通道已开放）" : "（未绑定，业务命令可能被丢弃）"));
+            return;
+        }
         if (cmd == 0x16 || cmd == 0xE5) {
             if (d.length >= 4 && d[2] == 0x00) {
                 int bpm = d[3] & 0xFF;
@@ -202,6 +224,7 @@ public class BandClient {
         connectedLatch = new CountDownLatch(1);
         readyLatch = new CountDownLatch(1);
         ready = false;
+        authSeen = false;
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -233,6 +256,20 @@ public class BandClient {
         if (!ready) {
             close();
             return false;
+        }
+
+        // 确认解锁已被手表受理；没回应就重发，最多 3 次
+        for (int i = 0; i < 3 && !authSeen; i++) {
+            writeCommand(CMD_UNLOCK);
+            try {
+                Thread.sleep(600);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (!authSeen) {
+            state("警告：未收到认证回应，心率可能读不到");
         }
         return true;
     }
@@ -266,6 +303,7 @@ public class BandClient {
 
     public void close() {
         ready = false;
+        authSeen = false;
         BluetoothGatt g = gatt;
         gatt = null;
         chWrite = null;

@@ -189,6 +189,10 @@ public class GuardService extends Service {
                     break;
                 }
                 pokes++;
+                // 首次重触发时补发一次解锁帧：某些情况下通道会重新上锁
+                if (pokes == 1) {
+                    band.writeCommand(BandClient.CMD_UNLOCK);
+                }
                 band.writeCommand(new byte[]{BandClient.CMD_HEART_RATE});
                 LogBus.log("断流，重触发 0x16 (" + pokes + "/4)");
                 lastValid[0] = System.currentTimeMillis();
