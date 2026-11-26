@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">睡眠守护</string>
+    <string name="btn_start">开始守护</string>
+    <string name="btn_stop">停止守护</string>
+    <string name="btn_test">立即测一次</string>
+    <string name="btn_pair">系统配对</string>
+    <string name="btn_clear">清空日志</string>
+    <string name="hint_addr">手表 MAC 地址</string>
+    <string name="label_interval">检测间隔（分钟）</string>
+    <string name="label_sample">单次采样（秒）</string>
+    <string name="status_idle">未运行</string>
+</resources>

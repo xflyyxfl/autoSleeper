@@ -1,0 +1,57 @@
+name: Build Debug APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload Debug APK (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoSleeper-debug
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Create Release & Upload APK
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.${{ github.run_number }}
+          name: Build #${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify WeChat
+        if: github.event_name == 'push'
+        continue-on-error: true
+        run: |
+          DOWNLOAD_URL="${{ github.server_url }}/${{ github.repository }}/releases/download/v1.${{ github.run_number }}/app-debug.apk"
+          curl -G "https://peiyun.cn/msg/wemsg" --data-urlencode "msg=${DOWNLOAD_URL}" --data-urlencode "to=xfl" || true
