@@ -170,11 +170,11 @@ public class BandClient {
                     g.discoverServices();
                 } catch (Throwable t) {
                     state("discoverServices 失败: " + t.getMessage());
-                    releaseReady();
+                    failReady();
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 state("连接断开 (status=" + status + ")");
-                releaseReady();
+                failReady();
             }
         }
 
@@ -182,22 +182,24 @@ public class BandClient {
         public void onServicesDiscovered(BluetoothGatt g, int status) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 state("服务发现失败 status=" + status);
-                releaseReady();
+                failReady();
                 return;
             }
             BluetoothGattService svc = g.getService(SVC_MAIN);
             if (svc == null) {
                 state("未找到 600ff 服务（可能不是该协议族的表）");
-                releaseReady();
+                failReady();
                 return;
             }
             chWrite = svc.getCharacteristic(CH_WRITE);
             chNotify = svc.getCharacteristic(CH_NOTIFY);
             if (chWrite == null || chNotify == null) {
                 state("命令/通知特征缺失");
-                releaseReady();
+                failReady();
                 return;
             }
+            // 先把 ready 置位：下面选配 CCCD 时要发解锁帧，writeCommand 依赖 ready
+            ready = true;
             try {
                 g.setCharacteristicNotification(chNotify, true);
                 BluetoothGattDescriptor d = chNotify.getDescriptor(CCCD);
@@ -210,19 +212,21 @@ public class BandClient {
                     }
                 } else {
                     // 没有 CCCD 描述符时没有回调，直接在这里解锁
+                    state("无 CCCD，直接发解锁帧");
                     writeCommand(CMD_UNLOCK);
                 }
             } catch (Throwable t) {
                 state("开启通知异常: " + t.getMessage());
+                writeCommand(CMD_UNLOCK);
             }
-            ready = true;
             state("通道就绪");
-            releaseReady();
+            signalReady();
         }
 
         @Override
         public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d, int status) {
-            if (d != null && CCCD.equals(d.getCharacteristic().getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
+            // 这里要比较描述符自己的 UUID（2902），不是它所属特征的 UUID（6002）
+            if (d != null && CCCD.equals(d.getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
                 // 关键：通知开关生效后立刻发解锁帧，手表收到才开始处理业务命令
                 writeCommand(CMD_UNLOCK);
                 state("已解锁命令通道（20 01）");
@@ -245,8 +249,14 @@ public class BandClient {
         }
     };
 
-    private void releaseReady() {
+    /** 连接失败：清掉 ready 并唤醒等待方。 */
+    private void failReady() {
         ready = false;
+        signalReady();
+    }
+
+    /** 只负责唤醒等待方，不改变 ready。成功后必须用这个，否则会把 ready 自己清掉。 */
+    private void signalReady() {
         CountDownLatch l = readyLatch;
         if (l != null) {
             l.countDown();
