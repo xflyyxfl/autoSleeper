@@ -52,6 +52,8 @@ public class GuardService extends Service {
     private PowerManager.WakeLock wakeLock;
     private volatile boolean stopRequested = false;
     private volatile boolean notifiedAsleep = false;
+    /** 连续多少轮拿到的曲线没有新数据。 */
+    private int staleRounds = 0;
     private NotificationManager nm;
 
     @Override
@@ -138,6 +140,16 @@ public class GuardService extends Service {
                 }
                 if (stopRequested) {
                     break;
+                }
+
+                // 睡醒后重新对表：进程可能被系统冻结过，醒来时这一格早就过去了。
+                // 此时再连上去只会"开灯 0 秒"——既不产生数据，还会把刚开的灯立刻关掉。
+                long late = System.currentTimeMillis() - onAt;
+                if (late > 20000L) {
+                    LogBus.log(String.format(Locale.US,
+                            "唤醒时已错过开灯点 %d 秒，跳过本格（不连表，避免空转）",
+                            late / 1000));
+                    continue;
                 }
                 cycle(boundary);
             } while (!stopRequested);
@@ -236,6 +248,23 @@ public class GuardService extends Service {
 
         updateNotification("读取心率曲线…");
         BandClient.PulseHistory h = band.fetchPulseHistory(12000);
+
+        // 连着几轮都拿不到新格子时，把手环的监测开关重置一次。
+        // 固件偶尔会卡在"关了就不再开"的状态，重发一遍 18 02/18 01 能救回来。
+        if (h.ok() && h.ageMinutes() > 35) {
+            staleRounds++;
+            if (staleRounds >= 3) {
+                LogBus.log("连续 " + staleRounds + " 轮没有新数据，重置心率监测开关");
+                band.setHeartRateMonitor(false);
+                sleepMs(300);
+                band.setHeartRateMonitor(true);
+                sleepMs(800);
+                band.setHeartRateMonitor(false);
+                staleRounds = 0;
+            }
+        } else if (h.ok()) {
+            staleRounds = 0;
+        }
         band.close();
 
         if (!h.ok()) {
@@ -244,10 +273,10 @@ public class GuardService extends Service {
         }
 
         int age = h.ageMinutes();
+        int lastMin = h.lastIndex * BandClient.SLOT_MINUTES;
         LogBus.log(String.format(Locale.US,
-                "曲线 %d 格有效（每格 %d 分钟），手表时间 %02d:%02d，最后一格距今约 %d 分钟",
-                h.valid, BandClient.SLOT_MINUTES,
-                Math.max(0, h.hour), Math.max(0, h.minute), age));
+                "曲线 %d 格有效，最后一格是 %02d:%02d（%d 分钟前）",
+                h.valid, (lastMin / 60) % 24, lastMin % 60, age));
 
         List<Integer> all = h.recent(BandClient.SLOT_COUNT);
         LogBus.log("  最近 12 格: " + tailText(all, 12));
@@ -257,7 +286,8 @@ public class GuardService extends Service {
         PulseStore.save(this);
 
         if (age > 35) {
-            LogBus.log("数据太旧（>" + 35 + " 分钟），本轮不判定。检查手环是否戴好");
+            LogBus.log("最后一格没被写进去：常见原因是手环没戴 / 没戴紧（测不到脉搏就不写格子），"
+                    + "也可能是心率监测被关掉了");
             return;
         }
 
@@ -307,6 +337,11 @@ public class GuardService extends Service {
         while (!stopRequested) {
             long left = targetMs - System.currentTimeMillis();
             if (left <= 0) {
+                return;
+            }
+            if (!band.isConnected()) {
+                // 连接已经掉了还接着等，只会白等一整轮（实测被冻结后会这样）
+                LogBus.log("等待中连接已断开，提前结束本轮");
                 return;
             }
             if (left > 45000L) {

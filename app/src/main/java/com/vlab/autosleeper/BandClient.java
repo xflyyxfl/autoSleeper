@@ -435,6 +435,19 @@ public class BandClient {
         return ready;
     }
 
+    /** 连接是否还活着。进程被冻结过之后，GATT 往往已经悄悄断开。 */
+    public boolean isConnected() {
+        BluetoothGatt g = gatt;
+        if (g == null || !ready) {
+            return false;
+        }
+        try {
+            return g.getDevice() != null;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /**
      * 拉取心率历史曲线。阻塞直到收到结束帧或超时。
      * 正常一次往返约 1~3 秒，给 12 秒足够。
