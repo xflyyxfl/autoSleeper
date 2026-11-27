@@ -317,7 +317,12 @@ public class BandClient {
                 // 数据包：18 07 y m d seq <12 字节>
                 if (d.length >= 18) {
                     int seq = d[5] & 0xFF;
-                    int idx = (seq / 2 - 1) * 12;
+                    // seq 的低半是"段号"：段 1..11 依次对应 00:00 起的每 2 小时，
+                    // 段 0 是跨天的那一段（22:00-24:00），固件把它排在最后发送。
+                    // 原来的 (seq/2-1)*12 会把段 0 算成 -12 丢掉，
+                    // 结果每天 22 点之后的数据全部收不到——这是数据"停在 21:40"的真正原因。
+                    int seg = seq / 2;
+                    int idx = (seg == 0) ? (SLOT_COUNT - 12) : (seg - 1) * 12;
                     if (idx >= 0 && idx + 12 <= SLOT_COUNT) {
                         synchronized (pulseLock) {
                             System.arraycopy(d, 6, rawSlots, idx, 12);
