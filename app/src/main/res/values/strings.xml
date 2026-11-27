@@ -12,6 +12,7 @@
     <string name="btn_history">历史曲线（本地存档）</string>
     <string name="hint_addr">手表 MAC 地址</string>
     <string name="label_interval">检测间隔（分钟）</string>
+    <string name="label_monitor">亮灯时长（秒）</string>
     <string name="label_threshold">睡眠阈值 M（bpm）</string>
     <string name="label_hold">持续 N 分钟</string>
     <string name="label_continuous">连续监测（心率灯常开，更准但费电）</string>

@@ -286,8 +286,10 @@ public class GuardService extends Service {
         PulseStore.save(this);
 
         if (age > 35) {
-            LogBus.log("最后一格没被写进去：常见原因是手环没戴 / 没戴紧（测不到脉搏就不写格子），"
-                    + "也可能是心率监测被关掉了");
+            LogBus.log(String.format(Locale.US,
+                    "本格没写进去：这次只亮了 %d 秒。固件要求连续采样约 210 秒以上才落格，"
+                            + "先把「亮灯时长」调大到 240 秒以上再看",
+                    cfg.monitorSec()));
             return;
         }
 

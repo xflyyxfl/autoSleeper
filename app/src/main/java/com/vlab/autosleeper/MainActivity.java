@@ -36,6 +36,7 @@ public class MainActivity extends AppCompatActivity {
 
     private EditText etAddr;
     private EditText etInterval;
+    private EditText etMonitor;
     private EditText etThreshold;
     private EditText etHold;
     private CheckBox cbContinuous;
@@ -69,6 +70,7 @@ public class MainActivity extends AppCompatActivity {
 
         etAddr = findViewById(R.id.etAddr);
         etInterval = findViewById(R.id.etInterval);
+        etMonitor = findViewById(R.id.etMonitor);
         etThreshold = findViewById(R.id.etThreshold);
         etHold = findViewById(R.id.etHold);
         cbContinuous = findViewById(R.id.cbContinuous);
@@ -165,6 +167,7 @@ public class MainActivity extends AppCompatActivity {
     private void loadConfig() {
         etAddr.setText(cfg.addr());
         etInterval.setText(String.valueOf(cfg.intervalMin()));
+        etMonitor.setText(String.valueOf(cfg.monitorSec()));
         etThreshold.setText(String.valueOf(cfg.threshold()));
         etHold.setText(String.valueOf(cfg.holdMinutes()));
         cbContinuous.setChecked(cfg.measureMode() == 1);
@@ -180,6 +183,7 @@ public class MainActivity extends AppCompatActivity {
         }
         cfg.setAddr(addr);
         cfg.setIntervalMin(parseInt(etInterval.getText().toString(), cfg.intervalMin()));
+        cfg.setMonitorSec(parseInt(etMonitor.getText().toString(), cfg.monitorSec()));
         cfg.setThreshold(parseInt(etThreshold.getText().toString(), cfg.threshold()));
         cfg.setHoldMinutes(parseInt(etHold.getText().toString(), cfg.holdMinutes()));
         cfg.setMeasureMode(cbContinuous.isChecked() ? 1 : 0);
