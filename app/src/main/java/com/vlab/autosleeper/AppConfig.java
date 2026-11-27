@@ -36,12 +36,33 @@ public class AppConfig {
         sp.edit().putInt("interval", clamp(v, 1, 120)).apply();
     }
 
-    public int sampleSec() {
-        return clamp(sp.getInt("sample", 45), 10, 180);
+    /**
+     * 每个周期里让手环开着心率监测的秒数。
+     *
+     * 固件的规矩：一格（10 分钟）内要有约 4 分钟以上的有效采样，
+     * 并且结算时刻（每 10 分钟整）监测还开着，这一格才会被写入。
+     * 所以这里不是"采样时长"，而是"亮灯时长"：每 10 分钟亮 monitorSec 秒，
+     * 卡在整点后 15 秒关闭，平均占空比 = monitorSec / 600。
+     * 默认 150 秒 ≈ 25%，续航损失比全程常亮小得多。
+     */
+    public int monitorSec() {
+        return clamp(sp.getInt("monitor", 150), 60, 600);
     }
 
-    public void setSampleSec(int v) {
-        sp.edit().putInt("sample", clamp(v, 10, 180)).apply();
+    public void setMonitorSec(int v) {
+        sp.edit().putInt("monitor", clamp(v, 60, 600)).apply();
+    }
+
+    /**
+     * 判定窗口用最近几格心率。每格 10 分钟，默认 3 格 = 30 分钟。
+     * 窗口太短噪声大，太长则对入睡反应迟钝。
+     */
+    public int windowSlots() {
+        return clamp(sp.getInt("windowSlots", 3), 2, 8);
+    }
+
+    public void setWindowSlots(int v) {
+        sp.edit().putInt("windowSlots", clamp(v, 2, 8)).apply();
     }
 
     /** 判定阈值：相对基线下降多少 bpm 记满分。 */

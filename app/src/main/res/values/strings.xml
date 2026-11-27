@@ -8,6 +8,6 @@
     <string name="btn_clear">清空日志</string>
     <string name="hint_addr">手表 MAC 地址</string>
     <string name="label_interval">检测间隔（分钟）</string>
-    <string name="label_sample">单次采样（秒）</string>
+    <string name="label_sample">判定窗口（格，1格=10分钟）</string>
     <string name="status_idle">未运行</string>
 </resources>

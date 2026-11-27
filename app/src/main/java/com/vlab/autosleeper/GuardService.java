@@ -106,26 +106,30 @@ public class GuardService extends Service {
     }
 
     private void loop(boolean once) {
-        LogBus.log(once ? "开始单次测量" : "开始守护，间隔 " + cfg.intervalMin() + " 分钟");
+        LogBus.log(once ? "开始单次测量"
+                : "开始守护：每 " + cfg.intervalMin() + " 分钟一次，每次亮灯 " + cfg.monitorSec() + " 秒");
         try {
             do {
-                long t0 = System.currentTimeMillis();
-                try {
-                    cycle();
-                } catch (Throwable t) {
-                    LogBus.log("周期异常: " + t);
-                }
-                if (once || stopRequested) {
+                if (once) {
+                    cycle(0L);
                     break;
                 }
-                long wait = cfg.intervalMin() * 60000L - (System.currentTimeMillis() - t0);
-                if (wait < 20000L) {
-                    wait = 20000L;
+                long boundary = nextBoundary(cfg.intervalMin());
+                long onAt = boundary - cfg.monitorSec() * 1000L;
+                long wait = onAt - 50 * 1000L - System.currentTimeMillis();
+                if (wait > 0) {
+                    acquireWake();
+                    String when = new java.text.SimpleDateFormat("HH:mm", Locale.US)
+                            .format(new java.util.Date(onAt));
+                    updateNotification("待机中，下次 " + when + " 开始采样");
+                    LogBus.log(String.format(Locale.US, "待机 %.1f 分钟，%s 开始亮灯",
+                            wait / 60000.0, when));
+                    sleepQuiet(wait);
                 }
-                LogBus.log(String.format(Locale.US, "下次检测在 %.1f 分钟后",
-                        wait / 60000.0));
-                updateNotification("守护中，下次检测 " + (wait / 60000) + " 分钟后");
-                sleepQuiet(wait);
+                if (stopRequested) {
+                    break;
+                }
+                cycle(boundary);
             } while (!stopRequested);
         } finally {
             running = false;
@@ -139,23 +143,39 @@ public class GuardService extends Service {
         }
     }
 
-    private void cycle() {
-        final List<Integer> hr = Collections.synchronizedList(new ArrayList<Integer>());
-        final long[] lastValid = {System.currentTimeMillis()};
+    /** 下一个对齐到 intervalMin 整数倍的整点时刻（毫秒）。 */
+    private static long nextBoundary(int intervalMin) {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        c.set(java.util.Calendar.HOUR_OF_DAY, 0);
+        c.set(java.util.Calendar.MINUTE, 0);
+        c.set(java.util.Calendar.SECOND, 0);
+        c.set(java.util.Calendar.MILLISECOND, 0);
+        long dayStart = c.getTimeInMillis();
+        long step = intervalMin * 60000L;
+        long k = (System.currentTimeMillis() - dayStart) / step + 1;
+        return dayStart + k * step;
+    }
 
+    /**
+     * 一轮：连表 → 在整点前开通监测 → 跨过整点后关闭 → 拉曲线 → 判定。
+     *
+     * boundary 为 0 表示单次测量（不等整点，直接开 20 秒后拉）。
+     */
+    private void cycle(long boundary) {
+        acquireWake();
         BandClient band = new BandClient(this, cfg.addr(), new BandClient.Listener() {
             @Override
             public void onHeartRate(int bpm) {
-                hr.add(bpm);
-                lastValid[0] = System.currentTimeMillis();
-                updateNotification("测量中，当前 " + bpm + " bpm");
             }
 
             @Override
             public void onFrame(byte[] data) {
-                // 心率帧太多，只记录异常帧
-                if (data.length > 0 && (data[0] & 0xFF) != 0x16) {
-                    LogBus.log("  <- " + hex(data));
+                // 0x18 曲线、0x09 活动心跳、0x1c 握手、0x20 认证都属正常流量
+                if (data.length > 0) {
+                    int c = data[0] & 0xFF;
+                    if (c != 0x18 && c != 0x16 && c != 0x1C && c != 0x20 && c != 0x09) {
+                        LogBus.log("  <- " + hex(data));
+                    }
                 }
             }
 
@@ -171,36 +191,52 @@ public class GuardService extends Service {
             return;
         }
 
-        band.writeCommand(new byte[]{BandClient.CMD_HEART_RATE});
-        LogBus.log("已下发 0x16，采样 " + cfg.sampleSec() + " 秒");
-
-        long deadline = System.currentTimeMillis() + cfg.sampleSec() * 1000L;
-        int pokes = 0;
-        while (!stopRequested && System.currentTimeMillis() < deadline) {
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-            if (System.currentTimeMillis() - lastValid[0] > 12000) {
-                if (pokes >= 4) {
-                    LogBus.log("多次重触发仍无数据，提前结束本轮");
-                    break;
-                }
-                pokes++;
-                // 首次重触发时补发一次解锁帧：某些情况下通道会重新上锁
-                if (pokes == 1) {
-                    band.writeCommand(BandClient.CMD_UNLOCK);
-                }
-                band.writeCommand(new byte[]{BandClient.CMD_HEART_RATE});
-                LogBus.log("断流，重触发 0x16 (" + pokes + "/4)");
-                lastValid[0] = System.currentTimeMillis();
-            }
+        long onAt;
+        long offAt;
+        if (boundary > 0) {
+            onAt = boundary - cfg.monitorSec() * 1000L;
+            offAt = boundary + 15000L;   // 必须跨过整点，否则这一格不结算
+        } else {
+            onAt = System.currentTimeMillis();
+            offAt = onAt + 20000L;
         }
+
+        sleepUntil(band, onAt);
+        band.setHeartRateMonitor(true);
+        LogBus.log(String.format(Locale.US, "开灯，保持 %d 秒到整点后关闭",
+                Math.max(0, (offAt - System.currentTimeMillis()) / 1000)));
+
+        updateNotification("采样中…");
+        sleepUntil(band, offAt);
+        band.setHeartRateMonitor(false);
+        LogBus.log("关灯（18 02）");
+        sleepMs(500);
+
+        updateNotification("读取心率曲线…");
+        BandClient.PulseHistory h = band.fetchPulseHistory(12000);
         band.close();
 
-        SleepJudge.Result r = judge.feed(snapshot(hr));
+        if (!h.ok()) {
+            LogBus.log("没拿到曲线：手环可能没戴，或本格没积累到足够采样");
+            return;
+        }
+
+        int age = h.ageMinutes();
+        LogBus.log(String.format(Locale.US,
+                "曲线 %d 格有效（每格 %d 分钟），手表时间 %02d:%02d，最后一格距今约 %d 分钟",
+                h.valid, BandClient.SLOT_MINUTES,
+                Math.max(0, h.hour), Math.max(0, h.minute), age));
+
+        List<Integer> all = h.recent(BandClient.SLOT_COUNT);
+        LogBus.log("  最近 12 格: " + tailText(all, 12));
+
+        if (age > 30) {
+            LogBus.log("数据太旧（>30 分钟），本轮不判定。检查手环是否戴好");
+            return;
+        }
+
+        List<Integer> win = SleepJudge.window(all, cfg.windowSlots());
+        SleepJudge.Result r = judge.feed(win);
         cfg.setBaseline(judge.getBaseline());
 
         LogBus.log(String.format(Locale.US,
@@ -221,9 +257,42 @@ public class GuardService extends Service {
         }
     }
 
-    private static List<Integer> snapshot(List<Integer> hr) {
-        synchronized (hr) {
-            return new ArrayList<>(hr);
+    /**
+     * 等到目标时刻。期间每 40 秒发一次电量查询当心跳，
+     * 防止空闲太久被手环主动断开（实测空闲 11 分钟必断）。
+     */
+    private void sleepUntil(BandClient band, long targetMs) {
+        while (!stopRequested) {
+            long left = targetMs - System.currentTimeMillis();
+            if (left <= 0) {
+                return;
+            }
+            if (left > 45000L) {
+                sleepMs(40000L);
+                band.writeCommand(new byte[]{0x03});
+            } else {
+                sleepMs(left);
+            }
+        }
+    }
+
+    private static String tailText(List<Integer> v, int n) {
+        int from = Math.max(0, v.size() - n);
+        StringBuilder sb = new StringBuilder();
+        for (int i = from; i < v.size(); i++) {
+            if (sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append(v.get(i));
+        }
+        return sb.toString();
+    }
+
+    private void sleepMs(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -295,8 +364,14 @@ public class GuardService extends Service {
             if (pm == null) {
                 return;
             }
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AutoSleeper::guard");
-            wakeLock.setReferenceCounted(false);
+            if (wakeLock == null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AutoSleeper::guard");
+                wakeLock.setReferenceCounted(false);
+            }
+            if (wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+            // 每个周期重新计时，保证跨过下一次整点的采样不会被 Doze 打断
             wakeLock.acquire(15 * 60 * 1000L);
         } catch (Throwable ignored) {
         }

@@ -65,7 +65,7 @@ public class MainActivity extends AppCompatActivity {
         cfg = new AppConfig(this);
         etAddr.setText(cfg.addr());
         etInterval.setText(String.valueOf(cfg.intervalMin()));
-        etSample.setText(String.valueOf(cfg.sampleSec()));
+        etSample.setText(String.valueOf(cfg.windowSlots()));
         tvLog.setText(LogBus.dump());
 
         Button btnStart = findViewById(R.id.btnStart);
@@ -132,7 +132,7 @@ public class MainActivity extends AppCompatActivity {
         }
         cfg.setAddr(addr);
         cfg.setIntervalMin(parseInt(etInterval.getText().toString(), cfg.intervalMin()));
-        cfg.setSampleSec(parseInt(etSample.getText().toString(), cfg.sampleSec()));
+        cfg.setWindowSlots(parseInt(etSample.getText().toString(), cfg.windowSlots()));
         return true;
     }
 
@@ -191,7 +191,8 @@ public class MainActivity extends AppCompatActivity {
     private void refreshStatus() {
         if (GuardService.running) {
             tvStatus.setText("守护运行中");
-            tvNow.setText("间隔 " + cfg.intervalMin() + " 分钟 / 采样 " + cfg.sampleSec() + " 秒");
+            tvNow.setText("每 " + cfg.intervalMin() + " 分钟读一次曲线 / 判定窗口 "
+                    + cfg.windowSlots() + " 格（" + (cfg.windowSlots() * BandClient.SLOT_MINUTES) + " 分钟）");
         } else {
             tvStatus.setText(R.string.status_idle);
             tvNow.setText("手环未连接");
