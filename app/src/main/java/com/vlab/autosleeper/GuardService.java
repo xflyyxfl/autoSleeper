@@ -60,6 +60,8 @@ public class GuardService extends Service {
         cfg = new AppConfig(this);
         nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         createChannel();
+        // 进程刚起来，内存是空的：先把上次落盘的曲线读回来，界面不会白屏
+        PulseStore.load(this);
     }
 
     private void createChannel() {
@@ -252,6 +254,7 @@ public class GuardService extends Service {
 
         // 先落盘再判新旧，界面上才能看到曲线
         PulseStore.update(h.slots, h.valid, h.lastIndex, h.hour, h.minute);
+        PulseStore.save(this);
 
         if (age > 35) {
             LogBus.log("数据太旧（>" + 35 + " 分钟），本轮不判定。检查手环是否戴好");
@@ -269,6 +272,7 @@ public class GuardService extends Service {
             cfg.setBaseline(judge.getBaseline());
         }
         PulseStore.setVerdict(r.median, cfg.threshold(), r.asleep, r.note);
+        PulseStore.appendVerdict(this, r.median, cfg.threshold(), r.asleep, r.note);
 
         LogBus.log(String.format(Locale.US,
                 "本轮结果: 中位=%d 阈值=%d 得分=%d %s",

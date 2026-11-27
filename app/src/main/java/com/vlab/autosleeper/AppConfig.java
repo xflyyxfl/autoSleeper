@@ -139,6 +139,15 @@ public class AppConfig {
         sp.edit().putBoolean("autoLock", v).apply();
     }
 
+    /** 开机后是否自动恢复守护。 */
+    public boolean resumeOnBoot() {
+        return sp.getBoolean("resumeOnBoot", true);
+    }
+
+    public void setResumeOnBoot(boolean v) {
+        sp.edit().putBoolean("resumeOnBoot", v).apply();
+    }
+
     public double baseline() {
         return sp.getFloat("baseline", 0f);
     }

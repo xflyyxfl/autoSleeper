@@ -139,6 +139,12 @@
             android:layout_height="wrap_content"
             android:text="@string/label_autolock" />
 
+        <CheckBox
+            android:id="@+id/cbBoot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/label_boot" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -216,6 +222,12 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/btn_battery" />
+
+        <Button
+            android:id="@+id/btnHistory"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_history" />
 
         <TextView
             android:layout_width="match_parent"

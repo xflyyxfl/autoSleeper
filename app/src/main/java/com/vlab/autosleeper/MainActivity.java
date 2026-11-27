@@ -21,6 +21,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -39,6 +40,7 @@ public class MainActivity extends AppCompatActivity {
     private EditText etHold;
     private CheckBox cbContinuous;
     private CheckBox cbAutoLock;
+    private CheckBox cbBoot;
     private TextView tvStatus;
     private TextView tvNow;
     private TextView tvLog;
@@ -71,6 +73,7 @@ public class MainActivity extends AppCompatActivity {
         etHold = findViewById(R.id.etHold);
         cbContinuous = findViewById(R.id.cbContinuous);
         cbAutoLock = findViewById(R.id.cbAutoLock);
+        cbBoot = findViewById(R.id.cbBoot);
         tvStatus = findViewById(R.id.tvStatus);
         tvNow = findViewById(R.id.tvNow);
         tvLog = findViewById(R.id.tvLog);
@@ -79,6 +82,8 @@ public class MainActivity extends AppCompatActivity {
 
         cfg = new AppConfig(this);
         loadConfig();
+        // 服务没在跑的时候，界面也能显示上次落盘的曲线
+        PulseStore.load(this);
         tvLog.setText(LogBus.dump());
 
         Button btnStart = findViewById(R.id.btnStart);
@@ -89,6 +94,7 @@ public class MainActivity extends AppCompatActivity {
         Button btnPair = findViewById(R.id.btnPair);
         Button btnClear = findViewById(R.id.btnClear);
         Button btnBattery = findViewById(R.id.btnBattery);
+        Button btnHistory = findViewById(R.id.btnHistory);
 
         btnStart.setOnClickListener(v -> {
             if (!saveConfig()) {
@@ -150,6 +156,8 @@ public class MainActivity extends AppCompatActivity {
 
         btnBattery.setOnClickListener(v -> requestIgnoreBattery());
 
+        btnHistory.setOnClickListener(v -> showHistory());
+
         ensurePerms();
         refreshStatus();
     }
@@ -161,6 +169,7 @@ public class MainActivity extends AppCompatActivity {
         etHold.setText(String.valueOf(cfg.holdMinutes()));
         cbContinuous.setChecked(cfg.measureMode() == 1);
         cbAutoLock.setChecked(cfg.autoLock());
+        cbBoot.setChecked(cfg.resumeOnBoot());
     }
 
     private boolean saveConfig() {
@@ -175,6 +184,7 @@ public class MainActivity extends AppCompatActivity {
         cfg.setHoldMinutes(parseInt(etHold.getText().toString(), cfg.holdMinutes()));
         cfg.setMeasureMode(cbContinuous.isChecked() ? 1 : 0);
         cfg.setAutoLock(cbAutoLock.isChecked());
+        cfg.setResumeOnBoot(cbBoot.isChecked());
         return true;
     }
 
@@ -230,6 +240,23 @@ public class MainActivity extends AppCompatActivity {
                 toast("请手动在系统设置里允许后台运行");
             }
         }
+    }
+
+    private void showHistory() {
+        java.io.File[] fs = PulseStore.history(this);
+        if (fs.length == 0) {
+            toast("还没有保存过曲线");
+            return;
+        }
+        String[] items = new String[fs.length];
+        for (int i = 0; i < fs.length; i++) {
+            items[i] = PulseStore.summary(fs[i]);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("本地存档（" + fs.length + " 天）")
+                .setItems(items, null)
+                .setPositiveButton("关闭", null)
+                .show();
     }
 
     private void doPair() {
