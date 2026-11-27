@@ -7,11 +7,15 @@ import android.bluetooth.BluetoothManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -23,6 +27,7 @@ import androidx.core.content.ContextCompat;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -30,10 +35,15 @@ public class MainActivity extends AppCompatActivity {
 
     private EditText etAddr;
     private EditText etInterval;
-    private EditText etSample;
+    private EditText etThreshold;
+    private EditText etHold;
+    private CheckBox cbContinuous;
+    private CheckBox cbAutoLock;
     private TextView tvStatus;
     private TextView tvNow;
     private TextView tvLog;
+    private TextView tvChartInfo;
+    private HeartChartView chart;
 
     private AppConfig cfg;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -57,22 +67,28 @@ public class MainActivity extends AppCompatActivity {
 
         etAddr = findViewById(R.id.etAddr);
         etInterval = findViewById(R.id.etInterval);
-        etSample = findViewById(R.id.etSample);
+        etThreshold = findViewById(R.id.etThreshold);
+        etHold = findViewById(R.id.etHold);
+        cbContinuous = findViewById(R.id.cbContinuous);
+        cbAutoLock = findViewById(R.id.cbAutoLock);
         tvStatus = findViewById(R.id.tvStatus);
         tvNow = findViewById(R.id.tvNow);
         tvLog = findViewById(R.id.tvLog);
+        tvChartInfo = findViewById(R.id.tvChartInfo);
+        chart = findViewById(R.id.chart);
 
         cfg = new AppConfig(this);
-        etAddr.setText(cfg.addr());
-        etInterval.setText(String.valueOf(cfg.intervalMin()));
-        etSample.setText(String.valueOf(cfg.windowSlots()));
+        loadConfig();
         tvLog.setText(LogBus.dump());
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
         Button btnTest = findViewById(R.id.btnTest);
+        Button btnLock = findViewById(R.id.btnLock);
+        Button btnAdmin = findViewById(R.id.btnAdmin);
         Button btnPair = findViewById(R.id.btnPair);
         Button btnClear = findViewById(R.id.btnClear);
+        Button btnBattery = findViewById(R.id.btnBattery);
 
         btnStart.setOnClickListener(v -> {
             if (!saveConfig()) {
@@ -113,6 +129,18 @@ public class MainActivity extends AppCompatActivity {
             toast("开始单次测量");
         });
 
+        btnLock.setOnClickListener(v -> {
+            if (!LockHelper.isActive(this)) {
+                toast("请先激活锁屏权限");
+                openAdmin();
+                return;
+            }
+            LockHelper.lock(this);
+            toast("已锁屏");
+        });
+
+        btnAdmin.setOnClickListener(v -> openAdmin());
+
         btnPair.setOnClickListener(v -> doPair());
 
         btnClear.setOnClickListener(v -> {
@@ -120,8 +148,19 @@ public class MainActivity extends AppCompatActivity {
             tvLog.setText("");
         });
 
+        btnBattery.setOnClickListener(v -> requestIgnoreBattery());
+
         ensurePerms();
         refreshStatus();
+    }
+
+    private void loadConfig() {
+        etAddr.setText(cfg.addr());
+        etInterval.setText(String.valueOf(cfg.intervalMin()));
+        etThreshold.setText(String.valueOf(cfg.threshold()));
+        etHold.setText(String.valueOf(cfg.holdMinutes()));
+        cbContinuous.setChecked(cfg.measureMode() == 1);
+        cbAutoLock.setChecked(cfg.autoLock());
     }
 
     private boolean saveConfig() {
@@ -132,7 +171,10 @@ public class MainActivity extends AppCompatActivity {
         }
         cfg.setAddr(addr);
         cfg.setIntervalMin(parseInt(etInterval.getText().toString(), cfg.intervalMin()));
-        cfg.setWindowSlots(parseInt(etSample.getText().toString(), cfg.windowSlots()));
+        cfg.setThreshold(parseInt(etThreshold.getText().toString(), cfg.threshold()));
+        cfg.setHoldMinutes(parseInt(etHold.getText().toString(), cfg.holdMinutes()));
+        cfg.setMeasureMode(cbContinuous.isChecked() ? 1 : 0);
+        cfg.setAutoLock(cbAutoLock.isChecked());
         return true;
     }
 
@@ -145,7 +187,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startGuardService() {
-        // 重新开始守护时清零基线，让判定从当前清醒心率重新标定
         cfg.resetBaseline();
         Intent i = new Intent(this, GuardService.class);
         i.setAction(GuardService.ACTION_START);
@@ -153,6 +194,41 @@ public class MainActivity extends AppCompatActivity {
             startForegroundService(i);
         } else {
             startService(i);
+        }
+    }
+
+    private void openAdmin() {
+        if (LockHelper.isActive(this)) {
+            toast("锁屏权限已激活");
+            return;
+        }
+        try {
+            startActivity(LockHelper.requestIntent(this));
+        } catch (Throwable t) {
+            toast("打不开设备管理器: " + t.getMessage());
+        }
+    }
+
+    /** 加入电池优化白名单，否则息屏后进程会被系统冻结，整夜无法采样。 */
+    private void requestIgnoreBattery() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                toast("已经在白名单里了");
+                return;
+            }
+            Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            i.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(i);
+        } catch (Throwable t) {
+            // 部分系统没有这个页面，退回到应用详情
+            try {
+                Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                i.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(i);
+            } catch (Throwable ignored) {
+                toast("请手动在系统设置里允许后台运行");
+            }
         }
     }
 
@@ -189,14 +265,45 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void refreshStatus() {
-        if (GuardService.running) {
-            tvStatus.setText("守护运行中");
-            tvNow.setText("每 " + cfg.intervalMin() + " 分钟读一次曲线 / 判定窗口 "
-                    + cfg.windowSlots() + " 格（" + (cfg.windowSlots() * BandClient.SLOT_MINUTES) + " 分钟）");
+        boolean run = GuardService.running;
+        if (run) {
+            tvStatus.setText(cfg.measureMode() == 1 ? "守护运行中（连续监测）" : "守护运行中（脉冲省电）");
         } else {
             tvStatus.setText(R.string.status_idle);
-            tvNow.setText("手环未连接");
         }
+
+        int thr = cfg.threshold();
+        chart.setData(PulseStore.snapshot(), PulseStore.lastIndex,
+                PulseStore.hour, PulseStore.minute, thr);
+
+        if (!PulseStore.hasData()) {
+            tvChartInfo.setText("还没有曲线数据，先点「立即测一次」");
+            tvNow.setText("手环未连接");
+            return;
+        }
+
+        String when = String.format(Locale.US, "%02d:%02d",
+                Math.max(0, PulseStore.hour), Math.max(0, PulseStore.minute));
+        String age = "";
+        if (PulseStore.updatedAt > 0) {
+            long min = (System.currentTimeMillis() - PulseStore.updatedAt) / 60000L;
+            age = " · " + min + " 分钟前拉取";
+        }
+        tvChartInfo.setText(String.format(Locale.US,
+                "共 %d 格有效（每格 %d 分钟）· 手表时间 %s%s",
+                PulseStore.validCount, BandClient.SLOT_MINUTES, when, age));
+
+        if (PulseStore.median > 0) {
+            tvNow.setText(String.format(Locale.US,
+                    "中位心率 %d bpm · 阈值 %d · %s%s",
+                    PulseStore.median, PulseStore.threshold,
+                    PulseStore.asleep ? "已判睡" : "清醒",
+                    PulseStore.note.isEmpty() ? "" : " · " + PulseStore.note));
+        } else {
+            tvNow.setText("曲线已就绪");
+        }
+
+        chart.setFooter(PulseStore.asleep ? "状态：已判睡" : "状态：清醒");
     }
 
     private boolean hasBlePerms() {
@@ -249,6 +356,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         LogBus.addSink(sink);
+        loadConfig();
         refreshStatus();
         ui.postDelayed(new Runnable() {
             @Override

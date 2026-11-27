@@ -17,6 +17,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 申请加入电池优化白名单，否则息屏后整夜采不到数据 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- 蓝牙 LE 特性声明（可选，用于应用商店过滤） -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
@@ -43,6 +45,19 @@
             android:name=".GuardService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- 设备管理器：只用于判定入睡后锁屏 -->
+        <receiver
+            android:name=".SleepAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

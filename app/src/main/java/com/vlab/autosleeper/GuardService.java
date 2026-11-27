@@ -47,6 +47,7 @@ public class GuardService extends Service {
 
     private AppConfig cfg;
     private SleepJudge judge;
+    private ThresholdJudge simple;
     private Thread worker;
     private PowerManager.WakeLock wakeLock;
     private volatile boolean stopRequested = false;
@@ -97,6 +98,7 @@ public class GuardService extends Service {
         stopRequested = false;
         notifiedAsleep = false;
         judge = new SleepJudge(cfg.baseline(), cfg.dropBpm(), cfg.needWindows());
+        simple = new ThresholdJudge(cfg.threshold(), cfg.holdMinutes(), cfg.needRounds());
         if (cfg.baseline() > 0) {
             LogBus.log("恢复上次基线: " + Math.round(cfg.baseline()) + " bpm");
         }
@@ -115,6 +117,12 @@ public class GuardService extends Service {
                     break;
                 }
                 long boundary = nextBoundary(cfg.intervalMin());
+                // 保证开灯点还有足够余量：连接和握手本身要花几秒，
+                // 如果开灯点已经过去，宁可等下一格，也不要连上去只亮 0 秒。
+                long need = (cfg.monitorSec() + 25L) * 1000L;
+                while (boundary - need < System.currentTimeMillis()) {
+                    boundary += cfg.intervalMin() * 60000L;
+                }
                 long onAt = boundary - cfg.monitorSec() * 1000L;
                 long wait = onAt - 50 * 1000L - System.currentTimeMillis();
                 if (wait > 0) {
@@ -191,10 +199,14 @@ public class GuardService extends Service {
             return;
         }
 
+        boolean continuous = cfg.measureMode() == 1;
+
         long onAt;
         long offAt;
         if (boundary > 0) {
-            onAt = boundary - cfg.monitorSec() * 1000L;
+            // 连续模式立刻开灯并一直保持；脉冲模式只在整点前亮一小段
+            onAt = continuous ? System.currentTimeMillis()
+                    : boundary - cfg.monitorSec() * 1000L;
             offAt = boundary + 15000L;   // 必须跨过整点，否则这一格不结算
         } else {
             onAt = System.currentTimeMillis();
@@ -203,14 +215,22 @@ public class GuardService extends Service {
 
         sleepUntil(band, onAt);
         band.setHeartRateMonitor(true);
-        LogBus.log(String.format(Locale.US, "开灯，保持 %d 秒到整点后关闭",
-                Math.max(0, (offAt - System.currentTimeMillis()) / 1000)));
+
+        if (continuous) {
+            LogBus.log("连续模式：心率灯全程开启");
+        } else {
+            LogBus.log(String.format(Locale.US, "开灯，保持 %d 秒，整点后关闭",
+                    Math.max(0, (offAt - System.currentTimeMillis()) / 1000)));
+        }
 
         updateNotification("采样中…");
         sleepUntil(band, offAt);
-        band.setHeartRateMonitor(false);
-        LogBus.log("关灯（18 02）");
-        sleepMs(500);
+
+        if (!continuous) {
+            band.setHeartRateMonitor(false);
+            LogBus.log("关灯（18 02）");
+            sleepMs(500);
+        }
 
         updateNotification("读取心率曲线…");
         BandClient.PulseHistory h = band.fetchPulseHistory(12000);
@@ -230,18 +250,29 @@ public class GuardService extends Service {
         List<Integer> all = h.recent(BandClient.SLOT_COUNT);
         LogBus.log("  最近 12 格: " + tailText(all, 12));
 
-        if (age > 30) {
-            LogBus.log("数据太旧（>30 分钟），本轮不判定。检查手环是否戴好");
+        // 先落盘再判新旧，界面上才能看到曲线
+        PulseStore.update(h.slots, h.valid, h.lastIndex, h.hour, h.minute);
+
+        if (age > 35) {
+            LogBus.log("数据太旧（>" + 35 + " 分钟），本轮不判定。检查手环是否戴好");
             return;
         }
 
-        List<Integer> win = SleepJudge.window(all, cfg.windowSlots());
-        SleepJudge.Result r = judge.feed(win);
-        cfg.setBaseline(judge.getBaseline());
+        SleepJudge.Result r;
+        if (cfg.judgeMode() == 0) {
+            // 简单阈值：心率低于 M 持续 N 分钟。
+            // 按格号取，保证空档也进窗口（有空格就不能算"持续"）
+            int need = Math.max(1, cfg.holdMinutes() / BandClient.SLOT_MINUTES);
+            r = simple.feed(slotsWindow(h.slots, h.lastIndex, need));
+        } else {
+            r = judge.feed(SleepJudge.window(all, cfg.windowSlots()));
+            cfg.setBaseline(judge.getBaseline());
+        }
+        PulseStore.setVerdict(r.median, cfg.threshold(), r.asleep, r.note);
 
         LogBus.log(String.format(Locale.US,
-                "本轮结果: 中位=%d sd=%.1f 得分=%d %s",
-                r.median, r.sd, r.score, r.asleep ? "已入睡" : "清醒/不确定"));
+                "本轮结果: 中位=%d 阈值=%d 得分=%d %s",
+                r.median, cfg.threshold(), r.score, r.asleep ? "已入睡" : "清醒/不确定"));
 
         sendState(r);
 
@@ -249,8 +280,15 @@ public class GuardService extends Service {
             notifiedAsleep = true;
             send(BC_ASLEEP, r);
             LogBus.log(">>> 判定入睡，已广播 ASLEEP");
+            if (cfg.autoLock()) {
+                updateNotification("已判定入睡，正在锁屏");
+                boolean ok = LockHelper.lock(this);
+                LogBus.log(ok ? ">>> 已锁屏" : ">>> 锁屏未执行（检查设备管理器是否激活）");
+            } else {
+                LogBus.log("自动锁屏已关闭，只广播不锁屏");
+            }
             updateNotification("已判定入睡，等待唤醒");
-        } else if (!r.asleep && notifiedAsleep && r.score < 30) {
+        } else if (!r.asleep && notifiedAsleep) {
             notifiedAsleep = false;
             send(BC_AWAKE, r);
             LogBus.log(">>> 已清醒，广播 AWAKE");
@@ -276,8 +314,20 @@ public class GuardService extends Service {
         }
     }
 
-    private static String tailText(List<Integer> v, int n) {
-        int from = Math.max(0, v.size() - n);
+    /** 按格号取最近 n 格，空格（-1）保留在窗口里，避免把两段不连续的数据拼成"持续"。 */
+    private static List<Integer> slotsWindow(int[] slots, int lastIndex, int n) {
+        List<Integer> out = new ArrayList<>();
+        if (slots == null || lastIndex < 0) {
+            return out;
+        }
+        int from = Math.max(0, lastIndex - n + 1);
+        for (int i = from; i <= lastIndex && i < slots.length; i++) {
+            out.add(slots[i]);
+        }
+        return out;
+    }
+
+    private static String tailText(List<Integer> v, int n) {        int from = Math.max(0, v.size() - n);
         StringBuilder sb = new StringBuilder();
         for (int i = from; i < v.size(); i++) {
             if (sb.length() > 0) {
@@ -371,8 +421,8 @@ public class GuardService extends Service {
             if (wakeLock.isHeld()) {
                 wakeLock.release();
             }
-            // 每个周期重新计时，保证跨过下一次整点的采样不会被 Doze 打断
-            wakeLock.acquire(15 * 60 * 1000L);
+            // 每个周期重新计时；等待循环里还会持续续期，防止长间隔被 Doze 打断
+            wakeLock.acquire(30 * 60 * 1000L);
         } catch (Throwable ignored) {
         }
     }
@@ -394,12 +444,24 @@ public class GuardService extends Service {
             if (left <= 0) {
                 return;
             }
+            // 等待期间持续续期，避免长间隔下 WakeLock 到期被 Doze 掐掉
+            keepWake();
             try {
                 Thread.sleep(Math.min(left, 3000L));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
             }
+        }
+    }
+
+    /** WakeLock 续期。间隔大于 15 分钟时，光靠 acquireWake 一次是撑不到下一轮的。 */
+    private void keepWake() {
+        try {
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire(30 * 60 * 1000L);
+            }
+        } catch (Throwable ignored) {
         }
     }
 

@@ -6,8 +6,14 @@
     <string name="btn_test">立即测一次</string>
     <string name="btn_pair">系统配对</string>
     <string name="btn_clear">清空日志</string>
+    <string name="btn_lock_now">立即锁屏</string>
+    <string name="btn_admin">激活锁屏权限</string>
+    <string name="btn_battery">关闭电池优化（保活）</string>
     <string name="hint_addr">手表 MAC 地址</string>
     <string name="label_interval">检测间隔（分钟）</string>
-    <string name="label_sample">判定窗口（格，1格=10分钟）</string>
+    <string name="label_threshold">睡眠阈值 M（bpm）</string>
+    <string name="label_hold">持续 N 分钟</string>
+    <string name="label_continuous">连续监测（心率灯常开，更准但费电）</string>
+    <string name="label_autolock">判定入睡后自动锁屏</string>
     <string name="status_idle">未运行</string>
 </resources>
