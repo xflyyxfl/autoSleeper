@@ -138,17 +138,25 @@ public final class PulseTable {
     }
 
     /**
-     * 以当前格为右端点，取最近 n 格。空洞保留为 NO_DATA。
+     * 取最近 n 个**已结算**格，空洞保留为 NO_DATA。
      *
-     * 这是唯一取窗口的入口：不再有「按有效值取最近 3 个」这种会跨小时的语义。
+     * 右端点是 curSlot-1，不是 curSlot。当前这一格要到下一格才落盘，
+     * 把它算进窗口会让每轮都带一个「假缺口」，阈值策略遇到缺口就放弃判定，
+     * 表现出来就是永远不判睡（日志里 sd=0.0、数据有缺口）。
      */
     public PulseWindow window(int n) {
         int size = Math.max(1, Math.min(n, SlotMath.SLOT_COUNT));
+        int end = SlotMath.slotAt(curSlot, 1);
         int[] out = new int[size];
         for (int k = size - 1; k >= 0; k--) {
-            out[size - 1 - k] = slots[SlotMath.slotAt(curSlot, k)];
+            out[size - 1 - k] = slots[SlotMath.slotAt(end, k)];
         }
         return PulseWindow.of(out);
+    }
+
+    /** 最近一个已结算格的时刻标签，写日志用。 */
+    public String settledLabel() {
+        return SlotMath.clockLabel(SlotMath.slotAt(curSlot, 1));
     }
 
     /** 手环时间标签 "HH:mm"；未知时返回 "--:--"。 */

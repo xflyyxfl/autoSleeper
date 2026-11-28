@@ -210,6 +210,18 @@ public final class Tasks {
             }
 
             int slots = ctx.cfg.holdSlots();
+
+            // 数据太旧就不判：窗口若停在几十分钟前，拿它判睡并锁屏是错的。
+            // 容差取「窗口时长 + 10 分钟」，最少 30 分钟。
+            int age = ctx.table.ageMinutes();
+            int limit = Math.max(30, slots * SlotMath.SLOT_MINUTES + 10);
+            if (age != Integer.MAX_VALUE && age > limit) {
+                LogBus.log(String.format(Locale.US,
+                        "数据太旧：最后一格 %s（%d 分钟前，容差 %d），本轮不判定",
+                        ctx.table.settledLabel(), age, limit));
+                return OpResult.skip("数据太旧");
+            }
+
             PulseWindow window = ctx.table.window(slots);
             JudgeOutcome outcome = engine.update(window);
 
@@ -223,7 +235,8 @@ public final class Tasks {
             }
             FloatWindow.refresh();
 
-            LogBus.log("判定窗口 " + slots + " 格 -> " + outcome.verdict().describe()
+            LogBus.log("判定窗口 " + slots + " 格（截至 " + ctx.table.settledLabel()
+                    + "）-> " + outcome.verdict().describe()
                     + (engine.sleeping() ? " [已判睡]" : ""));
             return OpResult.ok(outcome.verdict().text());
         }
