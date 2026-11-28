@@ -35,6 +35,8 @@ public class GuardService extends Service {
     public static final String ACTION_START = "com.vlab.autosleeper.action.START";
     public static final String ACTION_STOP = "com.vlab.autosleeper.action.STOP";
     public static final String ACTION_ONCE = "com.vlab.autosleeper.action.ONCE";
+    /** 看门狗检测到采样线程卡死时发出的强制重启指令。 */
+    public static final String ACTION_RESTART = "com.vlab.autosleeper.action.RESTART";
 
     public static final String BC_ASLEEP = "com.vlab.autosleeper.ASLEEP";
     public static final String BC_AWAKE = "com.vlab.autosleeper.AWAKE";
@@ -44,6 +46,8 @@ public class GuardService extends Service {
     private static final int NOTIF_ID = 1001;
 
     public static volatile boolean running = false;
+    /** 采样线程最近一次心跳的时刻；看门狗靠它判断线程是否卡死。 */
+    public static volatile long lastWorkerTick = 0L;
 
     private AppConfig cfg;
     private SleepJudge judge;
@@ -87,6 +91,18 @@ public class GuardService extends Service {
             stopGuard();
             return START_NOT_STICKY;
         }
+        if (ACTION_RESTART.equals(act)) {
+            LogBus.log("看门狗：采样线程无响应，强制重启采样");
+            stopGuard();
+            running = false;
+            worker = null;
+            startWorker(false);
+            AlarmWatchdog.scheduleNext(this);
+            if (cfg.floatEnabled()) {
+                FloatWindow.show(this);
+            }
+            return START_STICKY;
+        }
         boolean once = ACTION_ONCE.equals(act);
         startForeground(NOTIF_ID, buildNotification(once ? "单次测量中…" : "守护中，等待下次检测"));
         if (running) {
@@ -112,6 +128,7 @@ public class GuardService extends Service {
         running = true;
         stopRequested = false;
         notifiedAsleep = false;
+        lastWorkerTick = System.currentTimeMillis();
         judge = new SleepJudge(cfg.baseline(), cfg.dropBpm(), cfg.needWindows());
         simple = new ThresholdJudge(cfg.threshold(), cfg.holdMinutes(), cfg.needRounds());
         if (cfg.baseline() > 0) {
@@ -196,6 +213,7 @@ public class GuardService extends Service {
      */
     private void cycle(long boundary) {
         acquireWake();
+        lastWorkerTick = System.currentTimeMillis();
         BandClient band = new BandClient(this, cfg.addr(), new BandClient.Listener() {
             @Override
             public void onHeartRate(int bpm) {
@@ -354,6 +372,7 @@ public class GuardService extends Service {
             if (left <= 0) {
                 return;
             }
+            lastWorkerTick = System.currentTimeMillis();
             if (!band.isConnected()) {
                 // 连接已经掉了还接着等，只会白等一整轮（实测被冻结后会这样）
                 LogBus.log("等待中连接已断开，提前结束本轮");
@@ -361,7 +380,9 @@ public class GuardService extends Service {
             }
             if (left > 45000L) {
                 sleepMs(40000L);
+                lastWorkerTick = System.currentTimeMillis();
                 band.writeCommand(new byte[]{0x03});
+                lastWorkerTick = System.currentTimeMillis();
             } else {
                 sleepMs(left);
             }

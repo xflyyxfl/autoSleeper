@@ -16,7 +16,9 @@ import android.os.Build;
 public class AlarmWatchdog extends BroadcastReceiver {
 
     public static final String ACTION = "com.vlab.autosleeper.action.WATCHDOG";
-    private static final long PERIOD = 15 * 60 * 1000L;
+    private static final long PERIOD = 5 * 60 * 1000L;
+    /** 采样线程超过 3 分钟没心跳就认定卡死。正常一轮最长亮灯 600 秒，但期间每 40 秒会打点。 */
+    private static final long STUCK = 3 * 60 * 1000L;
 
     @Override
     public void onReceive(Context c, Intent intent) {
@@ -24,22 +26,34 @@ public class AlarmWatchdog extends BroadcastReceiver {
             return;
         }
         LogBus.log("看门狗检查");
-        if (!GuardService.running) {
-            LogBus.log("守护不在运行，看门狗重新拉起");
-            try {
-                Intent s = new Intent(c, GuardService.class);
-                s.setAction(GuardService.ACTION_START);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    c.startForegroundService(s);
-                } else {
-                    c.startService(s);
+        try {
+            if (!GuardService.running) {
+                LogBus.log("守护不在运行，看门狗重新拉起");
+                start(c, GuardService.ACTION_START);
+            } else {
+                long tick = GuardService.lastWorkerTick;
+                long age = tick > 0 ? System.currentTimeMillis() - tick : 0;
+                if (age > STUCK) {
+                    LogBus.log(String.format(java.util.Locale.US,
+                            "采样线程 %d 秒无心跳，强制重启", age / 1000));
+                    start(c, GuardService.ACTION_RESTART);
                 }
-            } catch (Throwable t) {
-                LogBus.log("看门狗拉起失败: " + t.getMessage());
             }
+        } catch (Throwable t) {
+            LogBus.log("看门狗异常: " + t.getMessage());
         }
         // 每次触发都排下一次，保证链不断
         scheduleNext(c);
+    }
+
+    private static void start(Context c, String action) {
+        Intent s = new Intent(c, GuardService.class);
+        s.setAction(action);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            c.startForegroundService(s);
+        } else {
+            c.startService(s);
+        }
     }
 
     private static PendingIntent pi(Context c) {
