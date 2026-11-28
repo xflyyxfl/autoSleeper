@@ -7,35 +7,42 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 
+import com.vlab.autosleeper.flow.FlowRuntime;
+
+import java.util.Locale;
+
 /**
- * 定时看门狗：每 15 分钟检查守护服务是否还活着，不在就拉起来。
+ * 定时看门狗：每 5 分钟检查守护是否还活着，不在就拉起来；线程卡死就重启。
  *
  * Doze 下普通 setRepeating 会被冻结，这里用 setExactAndAllowWhileIdle
  * （权限不足时退回 setAndAllowWhileIdle），保证熄屏后仍能唤醒一次。
+ *
+ * 状态查询改走 {@link FlowRuntime}：睡眠状态和线程都由流程层统一持有，
+ * 看门狗不再依赖 Service 里的静态字段。
  */
 public class AlarmWatchdog extends BroadcastReceiver {
 
     public static final String ACTION = "com.vlab.autosleeper.action.WATCHDOG";
     private static final long PERIOD = 5 * 60 * 1000L;
-    /** 采样线程超过 3 分钟没心跳就认定卡死。正常一轮最长亮灯 600 秒，但期间每 40 秒会打点。 */
+    /** 采样线程超过 3 分钟没心跳就认定卡死。 */
     private static final long STUCK = 3 * 60 * 1000L;
 
     @Override
     public void onReceive(Context c, Intent intent) {
-        if (!ACTION.equals(intent.getAction())) {
+        if (intent == null || !ACTION.equals(intent.getAction())) {
             return;
         }
         LogBus.log("看门狗检查");
         try {
-            if (!GuardService.running) {
+            if (!FlowRuntime.guardRunning()) {
                 LogBus.log("守护不在运行，看门狗重新拉起");
                 start(c, GuardService.ACTION_START);
             } else {
-                long tick = GuardService.lastWorkerTick;
-                long age = tick > 0 ? System.currentTimeMillis() - tick : 0;
+                long tick = FlowRuntime.lastTick();
+                long age = tick > 0 ? System.currentTimeMillis() - tick : 0L;
                 if (age > STUCK) {
-                    LogBus.log(String.format(java.util.Locale.US,
-                            "采样线程 %d 秒无心跳，强制重启", age / 1000));
+                    LogBus.log(String.format(Locale.US,
+                            "采样线程 %d 秒无心跳，强制重启", age / 1000L));
                     start(c, GuardService.ACTION_RESTART);
                 }
             }

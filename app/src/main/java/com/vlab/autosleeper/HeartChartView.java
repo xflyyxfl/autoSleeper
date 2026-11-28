@@ -2,20 +2,22 @@ package com.vlab.autosleeper;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.util.AttributeSet;
 import android.view.View;
 
-import java.util.Locale;
+import com.vlab.autosleeper.core.PulseTable;
+import com.vlab.autosleeper.core.SlotMath;
 
 /**
  * 心率曲线：手环按 10 分钟一格记录，这里把最近若干格画成折线。
  *
- * 空格（-1）处断线，不连成假的下降沿。
- * 同时画出阈值线，方便肉眼判断"多久低于阈值了"。
+ * 数据源改成 {@link PulseTable}：窗口、环形回绕、有效值判断都由 core 层统一提供，
+ * 画图不再自己算格号，也不会出现「曲线和判定用的不是同一份数据」。
+ *
+ * 空格处断线，不连成假的下降沿；叠加阈值线，方便肉眼判断「多久低于阈值了」。
  */
 public class HeartChartView extends View {
 
@@ -41,14 +43,9 @@ public class HeartChartView extends View {
     private final java.util.ArrayList<Float> px = new java.util.ArrayList<>();
     private final java.util.ArrayList<Float> py = new java.util.ArrayList<>();
 
-    private int[] slots = new int[0];
-    private int lastIndex = -1;
-    /** 当前时刻对应的格号，画曲线以它为右端点。 */
-    private int cur = -1;
-    private int hour = -1;
-    private int minute = -1;
+    private PulseTable table = PulseTable.empty();
     private int threshold = 55;
-    private int visible = DEFAULT_VISIBLE;
+    private final int visible = DEFAULT_VISIBLE;
     private String footer = "";
 
     private final float density;
@@ -94,13 +91,9 @@ public class HeartChartView extends View {
         return v * getResources().getDisplayMetrics().scaledDensity;
     }
 
-    /** 喂数据：曲线 + 判定阈值。cur 是当前格号，跨天后靠它定位右端点。 */
-    public void setData(int[] s, int lastIdx, int curIdx, int h, int m, int thr) {
-        this.slots = s == null ? new int[0] : s;
-        this.lastIndex = lastIdx;
-        this.cur = curIdx;
-        this.hour = h;
-        this.minute = m;
+    /** 喂数据：整张表 + 判定阈值。当前格由表自己提供。 */
+    public void setData(PulseTable data, int thr) {
+        this.table = data == null ? PulseTable.empty() : data;
         this.threshold = thr;
         invalidate();
     }
@@ -127,8 +120,8 @@ public class HeartChartView extends View {
         }
 
         // 以当前格为右端点，向左取 visible 格；跨 0 点自动回绕到前一天末尾
-        int base = cur >= 0 ? cur : lastIndex;
-        int count = base >= 0 ? Math.min(visible, BandClient.SLOT_COUNT) : 0;
+        int base = table.curSlot();
+        int count = table.isEmpty() ? 0 : Math.min(visible, SlotMath.SLOT_COUNT);
 
         int yMin = 40;
         int yMax = 130;
@@ -143,7 +136,7 @@ public class HeartChartView extends View {
         if (count <= 0) {
             pText.setColor(EMPTY_TEXT);
             pText.setTextSize(sp(11));
-            canvas.drawText("还没有曲线数据，先点「立即测一次」", left + dp(8), (top + bottom) / 2, pText);
+            canvas.drawText("还没有曲线数据，先点「测一次」", left + dp(8), (top + bottom) / 2, pText);
             pText.setTextSize(sp(9));
             pText.setColor(AXIS_TEXT);
             return;
@@ -164,9 +157,9 @@ public class HeartChartView extends View {
         py.clear();
         boolean started = false;
         for (int i = 0; i < count; i++) {
-            int idx = BandClient.PulseHistory.slotAt(base, count - 1 - i);
-            int v = idx < slots.length ? slots[idx] : BandClient.NO_DATA;
-            if (v < 30 || v > 220) {
+            int slot = SlotMath.slotAt(base, count - 1 - i);
+            int v = table.at(slot);
+            if (!SlotMath.valid(v)) {
                 started = false;
                 continue;
             }
@@ -198,10 +191,10 @@ public class HeartChartView extends View {
             canvas.drawLine(x, bottom, x, bottom + dp(3), pGrid);
             int back = count - 1 - i;
             if (back % labelStep == 0) {
-                String lab = timeLabel(BandClient.PulseHistory.slotAt(base, back));
-                float tw = pText.measureText(lab);
+                String label = SlotMath.clockLabel(SlotMath.slotAt(base, back));
+                float tw = pText.measureText(label);
                 float tx = Math.max(left, Math.min(right - tw, x - tw / 2));
-                canvas.drawText(lab, tx, h - dp(6), pText);
+                canvas.drawText(label, tx, h - dp(6), pText);
             }
         }
 
@@ -209,13 +202,6 @@ public class HeartChartView extends View {
             pText.setTextSize(sp(9));
             canvas.drawText(footer, left, top + sp(9), pText);
         }
-    }
-
-    /** 格号 → 具体时刻（格号即当天第几个 10 分钟）。 */
-    private String timeLabel(int idx) {
-        int totalMin = idx * BandClient.SLOT_MINUTES;
-        totalMin = ((totalMin % 1440) + 1440) % 1440;
-        return String.format(Locale.US, "%02d:%02d", totalMin / 60, totalMin % 60);
     }
 
     private static float mapY(int v, float top, float bottom, int yMin, int yMax) {

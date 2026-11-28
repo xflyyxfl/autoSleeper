@@ -149,7 +149,29 @@
                     android:layout_height="wrap_content"
                     android:inputType="number"
                     android:singleLine="true"
-                    android:text="20" />
+                    android:text="2" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="10dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/label_confirm"
+                    android:textSize="12sp" />
+
+                <EditText
+                    android:id="@+id/etConfirm"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="number"
+                    android:singleLine="true"
+                    android:text="2" />
             </LinearLayout>
         </LinearLayout>
 
@@ -159,6 +181,12 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
             android:text="@string/label_continuous" />
+
+        <CheckBox
+            android:id="@+id/cbBaseline"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/label_baseline" />
 
         <CheckBox
             android:id="@+id/cbAutoLock"
@@ -254,6 +282,14 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="@string/btn_test" />
+
+            <Button
+                android:id="@+id/btnStopOnce"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="@string/btn_stop_once" />
 
             <Button
                 android:id="@+id/btnFetch"

@@ -14,16 +14,18 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 
+import com.vlab.autosleeper.data.Config;
+
 /**
  * 悬浮球管理。设置里勾选后由 GuardService 调 show()，
- * 拉完曲线调 refresh()。位置与透明度存在 AppConfig 里。
+ * 拉完曲线调 refresh()。位置与透明度存在 Config 里。
  */
 public class FloatWindow {
 
     private static WindowManager wm;
     private static FloatBallView view;
     private static WindowManager.LayoutParams lp;
-    private static AppConfig cfg;
+    private static Config cfg;
     private static int ballSize;
 
     public static boolean hasPermission(Context c) {
@@ -41,7 +43,7 @@ public class FloatWindow {
             return;
         }
         Context app = c.getApplicationContext();
-        cfg = new AppConfig(app);
+        cfg = new Config(app);
         wm = (WindowManager) app.getSystemService(Service.WINDOW_SERVICE);
         if (wm == null) {
             return;
@@ -141,7 +143,7 @@ public class FloatWindow {
         if (view == null || wm == null || lp == null) {
             return;
         }
-        cfg = new AppConfig(c);
+        cfg = new Config(c);
         lp.alpha = cfg.floatAlpha() / 100f;
         applyPosition(c);
         try {

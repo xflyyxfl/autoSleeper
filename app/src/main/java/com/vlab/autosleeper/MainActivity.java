@@ -27,34 +27,42 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.vlab.autosleeper.core.PulseTable;
+import com.vlab.autosleeper.core.SlotMath;
+import com.vlab.autosleeper.core.Verdict;
+import com.vlab.autosleeper.data.Config;
+import com.vlab.autosleeper.data.PulseRepository;
+import com.vlab.autosleeper.flow.FlowRuntime;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+/**
+ * 主界面：只负责「呈现」和「触发」，不承载任何业务规则。
+ *
+ * 配置读写交给 {@link ConfigBinder}，曲线与判定结果读 {@link PulseRepository}，
+ * 运行状态问 {@link FlowRuntime}。界面不再直接连手环、不再自己算窗口。
+ */
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQ_PERM = 100;
+    private static final long REFRESH_MS = 3000L;
 
     private EditText etAddr;
-    private EditText etInterval;
-    private EditText etMonitor;
-    private EditText etThreshold;
-    private EditText etHold;
-    private CheckBox cbContinuous;
-    private CheckBox cbAutoLock;
-    private CheckBox cbBoot;
-    private CheckBox cbFloat;
-    private SeekBar sbAlpha;
-    private SeekBar sbX;
-    private SeekBar sbY;
     private TextView tvStatus;
     private TextView tvNow;
     private TextView tvLog;
     private TextView tvChartInfo;
     private HeartChartView chart;
+    private Button btnStopOnce;
+    private Button btnTest;
 
-    private AppConfig cfg;
+    private Config cfg;
+    private ConfigBinder binder;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    /** 绑定配置期间抑制控件回调，避免 setChecked 触发一次假的用户操作。 */
+    private boolean binding;
 
     private final LogBus.Sink sink = new LogBus.Sink() {
         @Override
@@ -62,9 +70,18 @@ public class MainActivity extends AppCompatActivity {
             ui.post(new Runnable() {
                 @Override
                 public void run() {
-                    appendLog(line);
+                    tvLog.setText(LogBus.dumpReversed());
+                    tvLog.scrollTo(0, 0);
                 }
             });
+        }
+    };
+
+    private final Runnable ticker = new Runnable() {
+        @Override
+        public void run() {
+            refreshStatus();
+            ui.postDelayed(this, REFRESH_MS);
         }
     };
 
@@ -75,32 +92,36 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         etAddr = findViewById(R.id.etAddr);
-        etInterval = findViewById(R.id.etInterval);
-        etMonitor = findViewById(R.id.etMonitor);
-        etThreshold = findViewById(R.id.etThreshold);
-        etHold = findViewById(R.id.etHold);
-        cbContinuous = findViewById(R.id.cbContinuous);
-        cbAutoLock = findViewById(R.id.cbAutoLock);
-        cbBoot = findViewById(R.id.cbBoot);
-        cbFloat = findViewById(R.id.cbFloat);
-        sbAlpha = findViewById(R.id.sbAlpha);
-        sbX = findViewById(R.id.sbX);
-        sbY = findViewById(R.id.sbY);
         tvStatus = findViewById(R.id.tvStatus);
         tvNow = findViewById(R.id.tvNow);
         tvLog = findViewById(R.id.tvLog);
         tvChartInfo = findViewById(R.id.tvChartInfo);
         chart = findViewById(R.id.chart);
+        btnStopOnce = findViewById(R.id.btnStopOnce);
+        btnTest = findViewById(R.id.btnTest);
 
-        cfg = new AppConfig(this);
-        loadConfig();
-        // 服务没在跑的时候，界面也能显示上次落盘的曲线
-        PulseStore.load(this);
+        cfg = new Config(this);
+        cfg.migrate();
+        binder = new ConfigBinder(this, cfg);
+
+        binding = true;
+        binder.load();
+        binding = false;
+
+        // 服务没在跑时，界面也能显示上次落盘的曲线
+        PulseRepository.restore(this);
         tvLog.setText(LogBus.dumpReversed());
 
+        bindButtons();
+        bindFloatControls();
+        ensurePerms();
+        refreshStatus();
+    }
+
+    private void bindButtons() {
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
-        Button btnTest = findViewById(R.id.btnTest);
+        Button btnTestBtn = findViewById(R.id.btnTest);
         Button btnFetch = findViewById(R.id.btnFetch);
         Button btnLock = findViewById(R.id.btnLock);
         Button btnAdmin = findViewById(R.id.btnAdmin);
@@ -108,44 +129,33 @@ public class MainActivity extends AppCompatActivity {
         Button btnClear = findViewById(R.id.btnClear);
         Button btnBattery = findViewById(R.id.btnBattery);
         Button btnHistory = findViewById(R.id.btnHistory);
+        Button btnOverlayPerm = findViewById(R.id.btnOverlayPerm);
 
         btnStart.setOnClickListener(v -> {
-            if (!saveConfig()) {
+            if (!prepare()) {
                 return;
             }
-            if (!hasBlePerms()) {
-                ensurePerms();
-                toast("缺少蓝牙权限，请授权后重试");
-                return;
-            }
-            startGuardService();
-            ui.postDelayed(this::refreshStatus, 600);
+            send(GuardService.ACTION_START, true);
+            toast("开始守护");
         });
 
         btnStop.setOnClickListener(v -> {
-            Intent i = new Intent(this, GuardService.class);
-            i.setAction(GuardService.ACTION_STOP);
-            startService(i);
-            ui.postDelayed(this::refreshStatus, 600);
+            send(GuardService.ACTION_STOP, false);
+            toast("正在停止守护");
         });
 
-        btnTest.setOnClickListener(v -> {
-            if (!saveConfig()) {
+        // 测一次：开灯 → 按设置的亮灯时长跑 → 到时自动收尾（也可随时点「结束」）
+        btnTestBtn.setOnClickListener(v -> {
+            if (!prepare()) {
                 return;
             }
-            if (!hasBlePerms()) {
-                ensurePerms();
-                toast("缺少蓝牙权限，请授权后重试");
-                return;
-            }
-            Intent i = new Intent(this, GuardService.class);
-            i.setAction(GuardService.ACTION_ONCE);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(i);
-            } else {
-                startService(i);
-            }
-            toast("开始单次测量");
+            send(GuardService.ACTION_ONCE, true);
+            toast("开始测量，约 " + cfg.monitorSec() + " 秒后可点「结束」提前收尾");
+        });
+
+        btnStopOnce.setOnClickListener(v -> {
+            send(GuardService.ACTION_STOP_ONCE, false);
+            toast("已结束亮灯，正在读取数据");
         });
 
         btnFetch.setOnClickListener(v -> {
@@ -154,14 +164,8 @@ public class MainActivity extends AppCompatActivity {
                 toast("缺少蓝牙权限，请授权后重试");
                 return;
             }
-            Intent i = new Intent(this, GuardService.class);
-            i.setAction(GuardService.ACTION_FETCH);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(i);
-            } else {
-                startService(i);
-            }
-            toast("正在拉取心率数据");
+            send(GuardService.ACTION_FETCH, true);
+            toast("正在读取心率数据");
         });
 
         btnLock.setOnClickListener(v -> {
@@ -175,7 +179,6 @@ public class MainActivity extends AppCompatActivity {
         });
 
         btnAdmin.setOnClickListener(v -> openAdmin());
-
         btnPair.setOnClickListener(v -> doPair());
 
         btnClear.setOnClickListener(v -> {
@@ -184,10 +187,8 @@ public class MainActivity extends AppCompatActivity {
         });
 
         btnBattery.setOnClickListener(v -> requestIgnoreBattery());
-
         btnHistory.setOnClickListener(v -> showHistory());
 
-        Button btnOverlayPerm = findViewById(R.id.btnOverlayPerm);
         btnOverlayPerm.setOnClickListener(v -> {
             try {
                 startActivity(FloatWindow.requestIntent(this));
@@ -195,11 +196,19 @@ public class MainActivity extends AppCompatActivity {
                 toast("打不开悬浮窗授权页");
             }
         });
+    }
 
-        cbFloat.setOnCheckedChangeListener((button, checked) -> {
+    private void bindFloatControls() {
+        CheckBox cbFloatBox = findViewById(R.id.cbFloat);
+        cbFloatBox.setOnCheckedChangeListener((button, checked) -> {
+            if (binding) {
+                return;
+            }
             if (checked && !FloatWindow.hasPermission(this)) {
                 toast("请先授权悬浮窗");
-                cbFloat.setChecked(false);
+                binding = true;
+                cbFloatBox.setChecked(false);
+                binding = false;
                 try {
                     startActivity(FloatWindow.requestIntent(this));
                 } catch (Throwable ignored) {
@@ -215,115 +224,123 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        sbAlpha.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        SeekBar sbAlpha = findViewById(R.id.sbAlpha);
+        sbAlpha.setOnSeekBarChangeListener(new SimpleSeekListener() {
             @Override
             public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
-                if (!fromUser) return;
+                if (!fromUser) {
+                    return;
+                }
                 cfg.setFloatAlpha(p + 20);
                 FloatWindow.apply(MainActivity.this);
             }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
-            }
         });
 
-        sbX.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        SeekBar sbX = findViewById(R.id.sbX);
+        sbX.setOnSeekBarChangeListener(new SimpleSeekListener() {
             @Override
             public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
-                if (!fromUser) return;
+                if (!fromUser) {
+                    return;
+                }
                 cfg.setFloatX(p);
                 FloatWindow.apply(MainActivity.this);
             }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
-            }
         });
 
-        sbY.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        SeekBar sbY = findViewById(R.id.sbY);
+        sbY.setOnSeekBarChangeListener(new SimpleSeekListener() {
             @Override
             public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
-                if (!fromUser) return;
+                if (!fromUser) {
+                    return;
+                }
                 cfg.setFloatY(p);
                 FloatWindow.apply(MainActivity.this);
             }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
-            }
         });
-
-        ensurePerms();
-        refreshStatus();
     }
 
-    private void loadConfig() {
-        etAddr.setText(cfg.addr());
-        etInterval.setText(String.valueOf(cfg.intervalMin()));
-        etMonitor.setText(String.valueOf(cfg.monitorSec()));
-        etThreshold.setText(String.valueOf(cfg.threshold()));
-        etHold.setText(String.valueOf(cfg.holdMinutes()));
-        cbContinuous.setChecked(cfg.measureMode() == 1);
-        cbAutoLock.setChecked(cfg.autoLock());
-        cbBoot.setChecked(cfg.resumeOnBoot());
-        cbFloat.setChecked(cfg.floatEnabled());
-        sbAlpha.setProgress(cfg.floatAlpha() - 20);
-        sbX.setProgress(cfg.floatX());
-        sbY.setProgress(cfg.floatY());
-    }
-
-    private boolean saveConfig() {
-        String addr = etAddr.getText().toString().trim();
-        if (addr.length() < 17) {
+    /** 保存配置 + 检查权限，任一失败就返回 false。 */
+    private boolean prepare() {
+        if (!binder.save()) {
             toast("MAC 地址格式不对，应为 AA:BB:CC:DD:EE:FF");
             return false;
         }
-        cfg.setAddr(addr);
-        cfg.setIntervalMin(parseInt(etInterval.getText().toString(), cfg.intervalMin()));
-        cfg.setMonitorSec(parseInt(etMonitor.getText().toString(), cfg.monitorSec()));
-        cfg.setThreshold(parseInt(etThreshold.getText().toString(), cfg.threshold()));
-        cfg.setHoldMinutes(parseInt(etHold.getText().toString(), cfg.holdMinutes()));
-        cfg.setMeasureMode(cbContinuous.isChecked() ? 1 : 0);
-        cfg.setAutoLock(cbAutoLock.isChecked());
-        cfg.setResumeOnBoot(cbBoot.isChecked());
-        cfg.setFloatEnabled(cbFloat.isChecked());
-        cfg.setFloatAlpha(sbAlpha.getProgress() + 20);
-        cfg.setFloatX(sbX.getProgress());
-        cfg.setFloatY(sbY.getProgress());
+        if (!hasBlePerms()) {
+            ensurePerms();
+            toast("缺少蓝牙权限，请授权后重试");
+            return false;
+        }
         return true;
     }
 
-    private static int parseInt(String s, int def) {
+    private void send(String action, boolean foreground) {
+        Intent i = new Intent(this, GuardService.class);
+        i.setAction(action);
         try {
-            return Integer.parseInt(s.trim());
+            if (foreground && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
         } catch (Throwable t) {
-            return def;
+            toast("启动失败：" + t.getMessage());
+            LogBus.log("启动失败: " + t);
         }
     }
 
-    private void startGuardService() {
-        cfg.resetBaseline();
-        Intent i = new Intent(this, GuardService.class);
-        i.setAction(GuardService.ACTION_START);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(i);
+    // ------------------------------------------------------------ 状态
+
+    private void refreshStatus() {
+        boolean guarding = FlowRuntime.guardRunning();
+        boolean measuring = FlowRuntime.onceRunning();
+
+        if (guarding) {
+            tvStatus.setText("守护运行中（" + cfg.measureMode().label()
+                    + " · " + cfg.judgeKind().label() + "）");
+        } else if (measuring) {
+            tvStatus.setText("单次测量中…");
         } else {
-            startService(i);
+            tvStatus.setText(R.string.status_idle);
         }
+
+        btnStopOnce.setEnabled(measuring);
+        btnTest.setEnabled(!guarding && !measuring);
+
+        PulseTable table = PulseRepository.current();
+        chart.setData(table, cfg.threshold());
+
+        if (table.isEmpty()) {
+            tvChartInfo.setText("还没有曲线数据，先点「测一次」");
+            tvNow.setText("手环未连接");
+            chart.setFooter("状态：无数据");
+            return;
+        }
+
+        long ageMin = 0L;
+        if (PulseRepository.updatedAt() > 0) {
+            ageMin = (System.currentTimeMillis() - PulseRepository.updatedAt()) / 60000L;
+        }
+        tvChartInfo.setText(String.format(Locale.US,
+                "共 %d 格有效（每格 %d 分钟）· 手表时间 %s · %d 分钟前读取",
+                table.validCount(), SlotMath.SLOT_MINUTES, table.watchLabel(), ageMin));
+
+        Verdict verdict = PulseRepository.verdict();
+        if (verdict != null && verdict.median > 0) {
+            tvNow.setText(String.format(Locale.US,
+                    "中位心率 %d bpm · 阈值 %d · %s · %s",
+                    verdict.median, cfg.threshold(),
+                    PulseRepository.sleeping() ? "已判睡" : "清醒",
+                    verdict.text()));
+        } else {
+            tvNow.setText("曲线已就绪");
+        }
+
+        chart.setFooter(PulseRepository.sleeping() ? "状态：已判睡" : "状态：清醒");
     }
+
+    // ------------------------------------------------------------ 系统交互
 
     private void openAdmin() {
         if (LockHelper.isActive(this)) {
@@ -349,7 +366,6 @@ public class MainActivity extends AppCompatActivity {
             i.setData(Uri.parse("package:" + getPackageName()));
             startActivity(i);
         } catch (Throwable t) {
-            // 部分系统没有这个页面，退回到应用详情
             try {
                 Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                 i.setData(Uri.parse("package:" + getPackageName()));
@@ -361,17 +377,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showHistory() {
-        java.io.File[] fs = PulseStore.history(this);
-        if (fs.length == 0) {
+        java.io.File[] files = PulseRepository.history(this);
+        if (files.length == 0) {
             toast("还没有保存过曲线");
             return;
         }
-        String[] items = new String[fs.length];
-        for (int i = 0; i < fs.length; i++) {
-            items[i] = PulseStore.summary(fs[i]);
+        String[] items = new String[files.length];
+        for (int i = 0; i < files.length; i++) {
+            items[i] = PulseRepository.summary(files[i]);
         }
         new AlertDialog.Builder(this)
-                .setTitle("本地存档（" + fs.length + " 天）")
+                .setTitle("本地存档（" + files.length + " 天）")
                 .setItems(items, null)
                 .setPositiveButton("关闭", null)
                 .show();
@@ -387,8 +403,7 @@ public class MainActivity extends AppCompatActivity {
         }
         try {
             BluetoothDevice dev = adapter.getRemoteDevice(addr);
-            int state = dev.getBondState();
-            if (state == BluetoothDevice.BOND_BONDED) {
+            if (dev.getBondState() == BluetoothDevice.BOND_BONDED) {
                 toast("已经配对过了");
                 LogBus.log("设备已处于配对状态");
                 return;
@@ -401,53 +416,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void appendLog(String line) {
-        // 倒序：最新的日志显示在最上面，整块重设一次
-        tvLog.setText(LogBus.dumpReversed());
-        tvLog.scrollTo(0, 0);
-    }
-
-    private void refreshStatus() {
-        boolean run = GuardService.running;
-        if (run) {
-            tvStatus.setText(cfg.measureMode() == 1 ? "守护运行中（连续监测）" : "守护运行中（脉冲省电）");
-        } else {
-            tvStatus.setText(R.string.status_idle);
-        }
-
-        int thr = cfg.threshold();
-        chart.setData(PulseStore.snapshot(), PulseStore.lastIndex, PulseStore.cur,
-                PulseStore.hour, PulseStore.minute, thr);
-
-        if (!PulseStore.hasData()) {
-            tvChartInfo.setText("还没有曲线数据，先点「立即测一次」");
-            tvNow.setText("手环未连接");
-            return;
-        }
-
-        String when = String.format(Locale.US, "%02d:%02d",
-                Math.max(0, PulseStore.hour), Math.max(0, PulseStore.minute));
-        String age = "";
-        if (PulseStore.updatedAt > 0) {
-            long min = (System.currentTimeMillis() - PulseStore.updatedAt) / 60000L;
-            age = " · " + min + " 分钟前拉取";
-        }
-        tvChartInfo.setText(String.format(Locale.US,
-                "共 %d 格有效（每格 %d 分钟）· 手表时间 %s%s",
-                PulseStore.validCount, BandClient.SLOT_MINUTES, when, age));
-
-        if (PulseStore.median > 0) {
-            tvNow.setText(String.format(Locale.US,
-                    "中位心率 %d bpm · 阈值 %d · %s%s",
-                    PulseStore.median, PulseStore.threshold,
-                    PulseStore.asleep ? "已判睡" : "清醒",
-                    PulseStore.note.isEmpty() ? "" : " · " + PulseStore.note));
-        } else {
-            tvNow.setText("曲线已就绪");
-        }
-
-        chart.setFooter(PulseStore.asleep ? "状态：已判睡" : "状态：清醒");
-    }
+    // ------------------------------------------------------------ 权限
 
     private boolean hasBlePerms() {
         if (Build.VERSION.SDK_INT >= 31) {
@@ -495,33 +464,42 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ------------------------------------------------------------ 生命周期
+
     @Override
     protected void onResume() {
         super.onResume();
         LogBus.addSink(sink);
-        loadConfig();
+        binding = true;
+        binder.load();
+        binding = false;
         refreshStatus();
-        // 从系统授权页返回时，如果用户已经勾选过，直接把球显示出来
         if (cfg.floatEnabled() && FloatWindow.hasPermission(this)) {
             FloatWindow.show(this);
         }
-        ui.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                refreshStatus();
-                ui.postDelayed(this, 3000);
-            }
-        }, 3000);
+        ui.removeCallbacks(ticker);
+        ui.postDelayed(ticker, REFRESH_MS);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         LogBus.removeSink(sink);
-        ui.removeCallbacksAndMessages(null);
+        ui.removeCallbacks(ticker);
     }
 
     private void toast(String s) {
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    }
+
+    /** SeekBar 只要进度变化，其余回调为空。 */
+    private abstract static class SimpleSeekListener implements SeekBar.OnSeekBarChangeListener {
+        @Override
+        public void onStartTrackingTouch(SeekBar seekBar) {
+        }
+
+        @Override
+        public void onStopTrackingTouch(SeekBar seekBar) {
+        }
     }
 }

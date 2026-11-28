@@ -6,9 +6,16 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.view.View;
 
+import com.vlab.autosleeper.core.PulseTable;
+import com.vlab.autosleeper.core.SlotMath;
+import com.vlab.autosleeper.core.Verdict;
+import com.vlab.autosleeper.data.PulseRepository;
+
 /**
- * 悬浮球：直径 48dp，中间显示最近一次拉到的心率，背景画最近 1 小时的趋势线。
- * 只求一眼能看到数字和大体走向，不承载精确读数。
+ * 悬浮球：直径 48dp，中间显示最近一格心率，背景画最近 1 小时的趋势线。
+ * 只求一眼看到数字和大体走向，不承载精确读数。
+ *
+ * 数据统一从 {@link PulseRepository} 读，与主界面、判定用的是同一份曲线。
  */
 public class FloatBallView extends View {
 
@@ -17,6 +24,9 @@ public class FloatBallView extends View {
     private static final int CURVE = 0x664DD0E1;
     private static final int DOT = 0xFFB2EBF2;
     private static final int TEXT = 0xFFFFFFFF;
+
+    /** 背景趋势线画最近几格（6 格 = 1 小时）。 */
+    private static final int TREND_SLOTS = 6;
 
     private final Paint pBg = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pRing = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -80,26 +90,24 @@ public class FloatBallView extends View {
         canvas.drawCircle(cx, cy, r, pBg);
         canvas.drawCircle(cx, cy, r, pRing);
 
-        int[] slots = PulseStore.snapshot();
-        int base = PulseStore.cur >= 0 ? PulseStore.cur : PulseStore.lastIndex;
+        PulseTable table = PulseRepository.current();
+        int base = table.curSlot();
 
-        // 背景趋势线：最近 6 格，只画到圆的中部以上，不盖住数字
-        if (base >= 0 && slots.length > 0) {
-            int n = 6;
+        // 背景趋势线：只画到圆的中部以上，不盖住数字
+        if (!table.isEmpty() && base >= 0) {
             float top = cy - r * 0.72f;
             float bottom = cy - r * 0.12f;
             line.reset();
             boolean started = false;
-            float lastX = 0;
-            float lastY = 0;
-            for (int k = n - 1; k >= 0; k--) {
-                int idx = BandClient.PulseHistory.slotAt(base, k);
-                int v = idx < slots.length ? slots[idx] : BandClient.NO_DATA;
-                if (v < 30 || v > 220) {
+            float lastX = 0f;
+            float lastY = 0f;
+            for (int k = TREND_SLOTS - 1; k >= 0; k--) {
+                int v = table.at(SlotMath.slotAt(base, k));
+                if (!SlotMath.valid(v)) {
                     started = false;
                     continue;
                 }
-                float x = cx - r * 0.82f + (2f * r * 0.82f) * (n - 1 - k) / (n - 1);
+                float x = cx - r * 0.82f + (2f * r * 0.82f) * (TREND_SLOTS - 1 - k) / (TREND_SLOTS - 1);
                 float y = mapY(v, top, bottom);
                 if (started) {
                     line.lineTo(x, y);
@@ -116,17 +124,15 @@ public class FloatBallView extends View {
             }
         }
 
-        // 显示最后一格的实际心率：不管数据来自守护还是单次测量，
-        // 只要拉到新曲线就更新。判定中位数另在主界面显示，不是这个球的任务。
-        int bpm = -1;
-        if (base >= 0 && base < slots.length && slots[base] >= 30) {
-            bpm = slots[base];
-        } else if (PulseStore.median > 0) {
-            bpm = PulseStore.median;
+        // 显示当前格的实际心率；当前格还没写满时退回最近一次判定的中位数
+        int bpm = table.at(base);
+        if (!SlotMath.valid(bpm)) {
+            Verdict verdict = PulseRepository.verdict();
+            bpm = verdict != null ? verdict.median : -1;
         }
+
         pText.setTextSize(sp(bpm >= 100 ? 11 : 12.5f));
-        canvas.drawText(bpm > 0 ? String.valueOf(bpm) : "--",
-                cx, cy + r * 0.55f, pText);
+        canvas.drawText(bpm > 0 ? String.valueOf(bpm) : "--", cx, cy + r * 0.55f, pText);
     }
 
     private static float mapY(int v, float top, float bottom) {

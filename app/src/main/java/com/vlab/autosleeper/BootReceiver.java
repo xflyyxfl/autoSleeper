@@ -5,20 +5,22 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 
+import com.vlab.autosleeper.data.Config;
+
 /**
- * 开机自启。守护服务靠 START_STICKY 能被系统拉回来，但重启手机后不会自动跑，
+ * 开机自启。守护靠 START_STICKY 能被系统拉回来，但重启手机后不会自动跑，
  * 这里补上：只要用户上次是开着守护的，开机后自动恢复。
  */
 public class BootReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context c, Intent intent) {
-        String a = intent == null ? null : intent.getAction();
-        if (!Intent.ACTION_BOOT_COMPLETED.equals(a)
-                && !"android.intent.action.QUICKBOOT_POWERON".equals(a)) {
+        String action = intent == null ? null : intent.getAction();
+        if (!Intent.ACTION_BOOT_COMPLETED.equals(action)
+                && !"android.intent.action.QUICKBOOT_POWERON".equals(action)) {
             return;
         }
-        AppConfig cfg = new AppConfig(c);
+        Config cfg = new Config(c);
         if (!cfg.resumeOnBoot()) {
             return;
         }

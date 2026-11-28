@@ -3,11 +3,12 @@
     <string name="app_name">睡眠守护</string>
     <string name="btn_start">开始守护</string>
     <string name="btn_stop">停止守护</string>
-    <string name="btn_test">立即测一次</string>
-    <string name="btn_fetch">拉取心率</string>
+    <string name="btn_test">测一次</string>
+    <string name="btn_stop_once">结束</string>
+    <string name="btn_fetch">拉取</string>
     <string name="btn_pair">系统配对</string>
     <string name="btn_clear">清空日志</string>
-    <string name="btn_lock_now">立即锁屏</string>
+    <string name="btn_lock_now">锁屏</string>
     <string name="btn_admin">激活锁屏权限</string>
     <string name="btn_battery">关闭电池优化（保活）</string>
     <string name="btn_history">历史曲线（本地存档）</string>
@@ -15,8 +16,10 @@
     <string name="label_interval">检测间隔（分钟）</string>
     <string name="label_monitor">亮灯时长（秒）</string>
     <string name="label_threshold">睡眠阈值 M（bpm）</string>
-    <string name="label_hold">持续 N 分钟</string>
+    <string name="label_hold">窗口格数（×10 分钟）</string>
+    <string name="label_confirm">确认轮数</string>
     <string name="label_continuous">连续监测（心率灯常开，更准但费电）</string>
+    <string name="label_baseline">基线打分模式（高级，需先学清醒基线）</string>
     <string name="label_autolock">判定入睡后自动锁屏</string>
     <string name="label_boot">开机自动恢复守护</string>
     <string name="label_float">显示悬浮心率球（可拖动）</string>

@@ -9,72 +9,298 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.PowerManager;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.nio.charset.StandardCharsets;
+import com.vlab.autosleeper.data.Config;
+import com.vlab.autosleeper.data.PulseRepository;
+import com.vlab.autosleeper.flow.FlowListener;
+import com.vlab.autosleeper.flow.FlowRuntime;
+import com.vlab.autosleeper.task.OpResult;
+import com.vlab.autosleeper.task.Task;
+import com.vlab.autosleeper.task.TaskContext;
+import com.vlab.autosleeper.task.TaskRunner;
+import com.vlab.autosleeper.task.Tasks;
+
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 
 /**
- * 前台守护服务：定时连手表 → 采心率 → 判定 → 广播结果。
+ * 前台服务：只做三件事 —— 生命周期、前台通知、把 Intent 路由到流程。
  *
- * 广播（供 Tasker / AutoJS 消费）：
- *   com.vlab.autosleeper.ASLEEP   extra: bpm, score, at
- *   com.vlab.autosleeper.AWAKE    extra: bpm, score, at
- *   com.vlab.autosleeper.STATE    extra: bpm, score, asleep, at
+ * 以前这里 674 行，同时管线程、调度、BLE 编排、判定、落盘、广播、唤醒锁。
+ * 现在业务全部下沉到 flow/task 层，服务本身只负责「处理谁的指令」和「什么时候停自己」。
+ *
+ * 对外契约（Tasker / AutoJS）保持不变：
+ *   START / STOP / ONCE / FETCH / RESTART
+ *   广播 ASLEEP / AWAKE / STATE，extra: bpm score asleep at
+ *   state.txt 格式 asleep,62,80,1732...
+ * 新增：
+ *   STOP_ONCE  提前结束单次测量的亮灯（随后自动拉取、判定）
+ *   TASK       单独执行一个原子操作，extra: task=connect|ledOn|ledOff|fetchPulse|judge
  */
-public class GuardService extends Service {
+public class GuardService extends Service implements FlowListener {
 
     public static final String ACTION_START = "com.vlab.autosleeper.action.START";
     public static final String ACTION_STOP = "com.vlab.autosleeper.action.STOP";
     public static final String ACTION_ONCE = "com.vlab.autosleeper.action.ONCE";
-    /** 只拉一次曲线并更新显示，不开灯、不判定、不锁屏。 */
+    /** 提前结束单次测量的亮灯，流程会继续拉数据并判定。 */
+    public static final String ACTION_STOP_ONCE = "com.vlab.autosleeper.action.STOP_ONCE";
     public static final String ACTION_FETCH = "com.vlab.autosleeper.action.FETCH";
     /** 看门狗检测到采样线程卡死时发出的强制重启指令。 */
     public static final String ACTION_RESTART = "com.vlab.autosleeper.action.RESTART";
+    /** 单独执行一个原子操作，供脚本组合流程。 */
+    public static final String ACTION_TASK = "com.vlab.autosleeper.action.TASK";
 
-    public static final String BC_ASLEEP = "com.vlab.autosleeper.ASLEEP";
-    public static final String BC_AWAKE = "com.vlab.autosleeper.AWAKE";
-    public static final String BC_STATE = "com.vlab.autosleeper.STATE";
+    public static final String EXTRA_TASK = "task";
+
+    public static final String TASK_CONNECT = "connect";
+    public static final String TASK_LED_ON = "ledOn";
+    public static final String TASK_LED_OFF = "ledOff";
+    public static final String TASK_FETCH = "fetchPulse";
+    public static final String TASK_JUDGE = "judge";
 
     private static final String CH_ID = "guard";
     private static final int NOTIF_ID = 1001;
 
-    public static volatile boolean running = false;
-    /** 采样线程最近一次心跳的时刻；看门狗靠它判断线程是否卡死。 */
-    public static volatile long lastWorkerTick = 0L;
-
-    private AppConfig cfg;
-    private SleepJudge judge;
-    private ThresholdJudge simple;
-    private Thread worker;
-    private Thread fetchWorker;
-    /** BLE 是单连接：守护与手动拉取必须互斥。守护持有较久，手动点不到就立即提示重试。 */
-    private static final java.util.concurrent.locks.ReentrantLock BLE_LOCK =
-            new java.util.concurrent.locks.ReentrantLock();
-    private PowerManager.WakeLock wakeLock;
-    private volatile boolean stopRequested = false;
-    private volatile boolean notifiedAsleep = false;
-    /** 连续多少轮拿到的曲线没有新数据。 */
-    private int staleRounds = 0;
+    private Config cfg;
     private NotificationManager nm;
+    private ExecutorService control;
+    private volatile String statusText = "待机";
 
     @Override
     public void onCreate() {
         super.onCreate();
         CrashHandler.install(this);
-        cfg = new AppConfig(this);
+        cfg = new Config(this);
+        cfg.migrate();
         nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         createChannel();
-        // 进程刚起来，内存是空的：先把上次落盘的曲线读回来，界面不会白屏
-        PulseStore.load(this);
+        control = Executors.newSingleThreadExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "guard-control");
+                t.setDaemon(true);
+                return t;
+            }
+        });
+        // 进程刚起来内存是空的：把上次落盘的曲线读回来，界面不会白屏
+        PulseRepository.restore(this);
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent == null ? null : intent.getAction();
+        if (action == null) {
+            action = ACTION_START;
+        }
+
+        // 必须同步调用，否则 startForegroundService 之后 5 秒内没转前台会被系统干掉
+        startForeground(NOTIF_ID, buildNotification(defaultText(action)));
+
+        if (ACTION_STOP.equals(action)) {
+            handleStop();
+            return START_NOT_STICKY;
+        }
+        if (ACTION_STOP_ONCE.equals(action)) {
+            LogBus.log("收到「提前结束」指令");
+            submit(new Runnable() {
+                @Override
+                public void run() {
+                    FlowRuntime.stopOnce();
+                }
+            });
+            return START_NOT_STICKY;
+        }
+        if (ACTION_FETCH.equals(action)) {
+            submit(new Runnable() {
+                @Override
+                public void run() {
+                    if (!FlowRuntime.startFetch(GuardService.this, cfg, GuardService.this)) {
+                        updateNotification("拉取未能启动");
+                        maybeStopSelf(FlowRuntime.FETCH);
+                    }
+                }
+            });
+            return START_NOT_STICKY;
+        }
+        if (ACTION_RESTART.equals(action)) {
+            LogBus.log("看门狗：重启守护");
+            submit(new Runnable() {
+                @Override
+                public void run() {
+                    FlowRuntime.stopGuard();
+                    FlowRuntime.startGuard(GuardService.this, cfg, GuardService.this);
+                    AlarmWatchdog.scheduleNext(GuardService.this);
+                }
+            });
+            return START_STICKY;
+        }
+        if (ACTION_ONCE.equals(action)) {
+            submit(new Runnable() {
+                @Override
+                public void run() {
+                    if (!FlowRuntime.startOnce(GuardService.this, cfg, GuardService.this)) {
+                        updateNotification("单次测量未能启动（守护运行中请先停止）");
+                        maybeStopSelf(FlowRuntime.ONCE);
+                    }
+                }
+            });
+            return START_NOT_STICKY;
+        }
+        if (ACTION_TASK.equals(action)) {
+            final String task = intent == null ? null : intent.getStringExtra(EXTRA_TASK);
+            submit(new Runnable() {
+                @Override
+                public void run() {
+                    runSingleTask(task);
+                }
+            });
+            return START_NOT_STICKY;
+        }
+
+        // 默认 = 开始守护
+        submit(new Runnable() {
+            @Override
+            public void run() {
+                if (FlowRuntime.startGuard(GuardService.this, cfg, GuardService.this)) {
+                    AlarmWatchdog.scheduleNext(GuardService.this);
+                } else {
+                    updateNotification("守护已在运行");
+                }
+            }
+        });
+        return START_STICKY;
+    }
+
+    // ------------------------------------------------------------ 指令处理
+
+    private void handleStop() {
+        LogBus.log("收到停止指令");
+        FloatWindow.hide();
+        AlarmWatchdog.cancel(this);
+        submit(new Runnable() {
+            @Override
+            public void run() {
+                FlowRuntime.stopGuard();
+                maybeStopSelf("stop");
+            }
+        });
+    }
+
+    /**
+     * 单独跑一个原子操作。
+     * 除 connect 外都会自动先建连接，TaskRunner 会在结束时把连接关掉。
+     */
+    private void runSingleTask(String name) {
+        List<Task> chain = new ArrayList<>();
+        TaskContext ctx = new TaskContext(this, cfg);
+
+        if (TASK_CONNECT.equalsIgnoreCase(name)) {
+            chain.add(new Tasks.Connect());
+        } else if (TASK_LED_ON.equalsIgnoreCase(name)) {
+            chain.add(new Tasks.Connect());
+            chain.add(new Tasks.LedOn());
+        } else if (TASK_LED_OFF.equalsIgnoreCase(name)) {
+            chain.add(new Tasks.Connect());
+            chain.add(new Tasks.LedOff());
+        } else if (TASK_FETCH.equalsIgnoreCase(name)) {
+            chain.add(new Tasks.Connect());
+            chain.add(new Tasks.FetchPulse());
+        } else if (TASK_JUDGE.equalsIgnoreCase(name)) {
+            chain.add(new Tasks.Connect());
+            chain.add(new Tasks.FetchPulse());
+            chain.add(new Tasks.Judge());
+        } else {
+            LogBus.log("未知的 task: " + name);
+            updateNotification("未知的 task: " + name);
+            maybeStopSelf("task");
+            return;
+        }
+
+        OpResult result = TaskRunner.run(ctx, chain);
+        LogBus.log("单独执行 " + name + " -> " + result.code + " " + result.message);
+        updateNotification(name + "：" + result.message);
+        maybeStopSelf("task");
+    }
+
+    // ------------------------------------------------------------ FlowListener
+
+    @Override
+    public void onStatus(String text) {
+        statusText = text;
+        updateNotification(text);
+    }
+
+    @Override
+    public void onGuardChanged(boolean running) {
+        if (running) {
+            updateNotification("守护中");
+        }
+    }
+
+    @Override
+    public void onFlowEnd(String flow) {
+        if (FlowRuntime.anyOtherRunning(flow)) {
+            updateNotification(statusText);
+            return;
+        }
+        LogBus.log("所有流程已结束，停止服务");
+        stopForegroundCompat();
+        stopSelf();
+    }
+
+    // ------------------------------------------------------------ 生命周期
+
+    @Override
+    public void onDestroy() {
+        // 只发中断不等待：这里在主线程上，join 会卡住
+        FlowRuntime.interruptAll();
+        if (control != null) {
+            control.shutdownNow();
+        }
+        super.onDestroy();
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private void maybeStopSelf(String flow) {
+        if (FlowRuntime.anyOtherRunning(flow)) {
+            return;
+        }
+        stopForegroundCompat();
+        stopSelf();
+    }
+
+    private void submit(Runnable r) {
+        try {
+            control.execute(r);
+        } catch (Throwable t) {
+            LogBus.log("控制线程不可用: " + t.getMessage());
+        }
+    }
+
+    // ------------------------------------------------------------ 通知
+
+    private String defaultText(String action) {
+        if (ACTION_ONCE.equals(action)) {
+            return "单次测量中…";
+        }
+        if (ACTION_FETCH.equals(action)) {
+            return "读取心率曲线…";
+        }
+        if (ACTION_STOP.equals(action)) {
+            return "正在停止…";
+        }
+        return "守护中，等待下次检测";
     }
 
     private void createChannel() {
@@ -84,471 +310,6 @@ public class GuardService extends Service {
             ch.setDescription("后台监测手环心率并判断入睡");
             ch.setShowBadge(false);
             nm.createNotificationChannel(ch);
-        }
-    }
-
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        String act = intent == null ? null : intent.getAction();
-        if (ACTION_STOP.equals(act)) {
-            LogBus.log("收到停止指令");
-            FloatWindow.hide();
-            AlarmWatchdog.cancel(this);
-            stopGuard();
-            return START_NOT_STICKY;
-        }
-        if (ACTION_FETCH.equals(act)) {
-            // 纯拉取，与守护互不影响（靠 BLE_LOCK 互斥）
-            startForeground(NOTIF_ID, buildNotification("拉取心率中…"));
-            startFetch();
-            return START_NOT_STICKY;
-        }
-        if (ACTION_RESTART.equals(act)) {
-            LogBus.log("看门狗：采样线程无响应，强制重启采样");
-            stopGuard();
-            running = false;
-            worker = null;
-            startWorker(false);
-            AlarmWatchdog.scheduleNext(this);
-            if (cfg.floatEnabled()) {
-                FloatWindow.show(this);
-            }
-            return START_STICKY;
-        }
-        boolean once = ACTION_ONCE.equals(act);
-        startForeground(NOTIF_ID, buildNotification(once ? "单次测量中…" : "守护中，等待下次检测"));
-        if (running) {
-            LogBus.log("守护已在运行，忽略本次启动");
-            if (once) {
-                LogBus.log("（单次测量请先停止守护）");
-            }
-            return START_STICKY;
-        }
-        startWorker(once);
-        if (!once) {
-            // 看门狗：即使进程被杀，Doze 下也能按点把守护拉回来
-            AlarmWatchdog.scheduleNext(this);
-        }
-        // 单次测量也显示球：只要拉到了新曲线就更新，
-        // View 已改用 applicationContext，Service 退出不会让窗口失效
-        if (cfg.floatEnabled()) {
-            FloatWindow.show(this);
-        }
-        return once ? START_NOT_STICKY : START_STICKY;
-    }
-
-    private void startWorker(boolean once) {
-        running = true;
-        stopRequested = false;
-        notifiedAsleep = false;
-        lastWorkerTick = System.currentTimeMillis();
-        judge = new SleepJudge(cfg.baseline(), cfg.dropBpm(), cfg.needWindows());
-        simple = new ThresholdJudge(cfg.threshold(), cfg.holdMinutes(), cfg.needRounds());
-        if (cfg.baseline() > 0) {
-            LogBus.log("恢复上次基线: " + Math.round(cfg.baseline()) + " bpm");
-        }
-        acquireWake();
-        worker = new Thread(() -> loop(once), "sleep-guard");
-        worker.start();
-    }
-
-    private void loop(boolean once) {
-        LogBus.log(once ? "开始单次测量"
-                : "开始守护：每 " + cfg.intervalMin() + " 分钟一次，每次亮灯 " + cfg.monitorSec() + " 秒");
-        try {
-            do {
-                if (once) {
-                    cycle(0L);
-                    break;
-                }
-                long boundary = nextBoundary(cfg.intervalMin());
-                // 保证开灯点还有足够余量：连接和握手本身要花几秒，
-                // 如果开灯点已经过去，宁可等下一格，也不要连上去只亮 0 秒。
-                long need = (cfg.monitorSec() + 25L) * 1000L;
-                while (boundary - need < System.currentTimeMillis()) {
-                    boundary += cfg.intervalMin() * 60000L;
-                }
-                long onAt = boundary - cfg.monitorSec() * 1000L;
-                long wait = onAt - 50 * 1000L - System.currentTimeMillis();
-                if (wait > 0) {
-                    acquireWake();
-                    String when = new java.text.SimpleDateFormat("HH:mm", Locale.US)
-                            .format(new java.util.Date(onAt));
-                    updateNotification("待机中，下次 " + when + " 开始采样");
-                    LogBus.log(String.format(Locale.US, "待机 %.1f 分钟，%s 开始亮灯",
-                            wait / 60000.0, when));
-                    sleepQuiet(wait);
-                }
-                if (stopRequested) {
-                    break;
-                }
-
-                // 睡醒后重新对表：进程可能被系统冻结过，醒来时这一格早就过去了。
-                // 此时再连上去只会"开灯 0 秒"——既不产生数据，还会把刚开的灯立刻关掉。
-                long late = System.currentTimeMillis() - onAt;
-                if (late > 20000L) {
-                    LogBus.log(String.format(Locale.US,
-                            "唤醒时已错过开灯点 %d 秒，跳过本格（不连表，避免空转）",
-                            late / 1000));
-                    continue;
-                }
-                cycle(boundary);
-            } while (!stopRequested);
-        } finally {
-            running = false;
-            releaseWake();
-            try {
-                stopForeground(true);
-            } catch (Throwable ignored) {
-            }
-            stopSelf();
-            LogBus.log("守护已结束");
-        }
-    }
-
-    /** 下一个对齐到 intervalMin 整数倍的整点时刻（毫秒）。 */
-    private static long nextBoundary(int intervalMin) {
-        java.util.Calendar c = java.util.Calendar.getInstance();
-        c.set(java.util.Calendar.HOUR_OF_DAY, 0);
-        c.set(java.util.Calendar.MINUTE, 0);
-        c.set(java.util.Calendar.SECOND, 0);
-        c.set(java.util.Calendar.MILLISECOND, 0);
-        long dayStart = c.getTimeInMillis();
-        long step = intervalMin * 60000L;
-        long k = (System.currentTimeMillis() - dayStart) / step + 1;
-        return dayStart + k * step;
-    }
-
-    /**
-     * 一轮：连表 → 在整点前开通监测 → 跨过整点后关闭 → 拉曲线 → 判定。
-     *
-     * boundary 为 0 表示单次测量（不等整点，直接开 20 秒后拉）。
-     */
-    private void cycle(long boundary) {
-        acquireWake();
-        lastWorkerTick = System.currentTimeMillis();
-        BLE_LOCK.lock();
-        try {
-            doCycle(boundary);
-        } finally {
-            BLE_LOCK.unlock();
-        }
-        releaseWake();
-    }
-
-    private void doCycle(long boundary) {
-        BandClient band = newBand();
-
-        LogBus.log("连接 " + cfg.addr());
-        if (!band.connect(15000)) {
-            LogBus.log("本轮连接失败，跳过");
-            band.close();
-            return;
-        }
-
-        boolean continuous = cfg.measureMode() == 1;
-
-        long onAt;
-        long offAt;
-        if (boundary > 0) {
-            // 连续模式立刻开灯并一直保持；脉冲模式只在整点前亮一小段
-            onAt = continuous ? System.currentTimeMillis()
-                    : boundary - cfg.monitorSec() * 1000L;
-            offAt = boundary + 15000L;   // 必须跨过整点，否则这一格不结算
-        } else {
-            onAt = System.currentTimeMillis();
-            offAt = onAt + 20000L;
-        }
-
-        sleepUntil(band, onAt);
-        band.setHeartRateMonitor(true);
-
-        if (continuous) {
-            LogBus.log("连续模式：心率灯全程开启");
-        } else {
-            LogBus.log(String.format(Locale.US, "开灯，保持 %d 秒，整点后关闭",
-                    Math.max(0, (offAt - System.currentTimeMillis()) / 1000)));
-        }
-
-        updateNotification("采样中…");
-        sleepUntil(band, offAt);
-
-        if (!continuous) {
-            band.setHeartRateMonitor(false);
-            LogBus.log("关灯（18 02）");
-            sleepMs(500);
-        }
-
-        updateNotification("读取心率曲线…");
-        BandClient.PulseHistory h = fetchAndStore(band);
-
-        if (h == null) {
-            return;
-        }
-
-        int age = h.ageMinutes();
-        List<Integer> all = h.recent(BandClient.SLOT_COUNT);
-
-        if (age > 35) {
-            LogBus.log(String.format(Locale.US,
-                    "本格没写进去：这次只亮了 %d 秒。固件要求连续采样约 210 秒以上才落格，"
-                            + "先把「亮灯时长」调大到 240 秒以上再看",
-                    cfg.monitorSec()));
-            return;
-        }
-
-        SleepJudge.Result r;
-        if (cfg.judgeMode() == 0) {
-            // 简单阈值：心率低于 M 持续 N 分钟。
-            // 按格号取，保证空档也进窗口（有空格就不能算"持续"）
-            int need = Math.max(1, cfg.holdMinutes() / BandClient.SLOT_MINUTES);
-            r = simple.feed(slotsWindow(h.slots, h.cur, need));
-        } else {
-            r = judge.feed(SleepJudge.window(all, cfg.windowSlots()));
-            cfg.setBaseline(judge.getBaseline());
-        }
-        PulseStore.setVerdict(r.median, cfg.threshold(), r.asleep, r.note);
-        PulseStore.appendVerdict(this, r.median, cfg.threshold(), r.asleep, r.note);
-        // 判定状态（已判睡）变了，再刷一次球上的状态文字
-        FloatWindow.refresh();
-
-        LogBus.log(String.format(Locale.US,
-                "本轮结果: 中位=%d 阈值=%d 得分=%d %s",
-                r.median, cfg.threshold(), r.score, r.asleep ? "已入睡" : "清醒/不确定"));
-
-        sendState(r);
-
-        if (r.asleep && !notifiedAsleep) {
-            notifiedAsleep = true;
-            send(BC_ASLEEP, r);
-            LogBus.log(">>> 判定入睡，已广播 ASLEEP");
-            if (cfg.autoLock()) {
-                updateNotification("已判定入睡，正在锁屏");
-                boolean ok = LockHelper.lock(this);
-                LogBus.log(ok ? ">>> 已锁屏" : ">>> 锁屏未执行（检查设备管理器是否激活）");
-            } else {
-                LogBus.log("自动锁屏已关闭，只广播不锁屏");
-            }
-            updateNotification("已判定入睡，等待唤醒");
-        } else if (!r.asleep && notifiedAsleep) {
-            notifiedAsleep = false;
-            send(BC_AWAKE, r);
-            LogBus.log(">>> 已清醒，广播 AWAKE");
-        }
-    }
-
-    /**
-     * 所有拉取心率数据的唯一入口：发 18 fa → 日志 → 落盘 → 刷新悬浮球。
-     * 守护周期、单次测量、手动「拉取心率」都走这里。
-     *
-     * 返回 null 表示没拿到曲线；调用方自行决定是否判定。
-     */
-    private BandClient.PulseHistory fetchAndStore(BandClient band) {
-        updateNotification("读取心率曲线…");
-        BandClient.PulseHistory h = band.fetchPulseHistory(12000);
-
-        // 连着几轮都拿不到新格子时重置监测开关（固件偶尔卡在"关了不再开"）
-        if (h.ok() && h.ageMinutes() > 35) {
-            staleRounds++;
-            if (staleRounds >= 3) {
-                LogBus.log("连续 " + staleRounds + " 轮没有新数据，重置心率监测开关");
-                band.setHeartRateMonitor(false);
-                sleepMs(300);
-                band.setHeartRateMonitor(true);
-                sleepMs(800);
-                band.setHeartRateMonitor(false);
-                staleRounds = 0;
-            }
-        } else if (h.ok()) {
-            staleRounds = 0;
-        }
-        band.close();
-
-        if (!h.ok()) {
-            LogBus.log("没拿到曲线：手环可能没戴，或本格没积累到足够采样");
-            return null;
-        }
-
-        int lastMin = h.lastIndex * BandClient.SLOT_MINUTES;
-        LogBus.log(String.format(Locale.US,
-                "曲线 %d 格有效，最后一格是 %02d:%02d（%d 分钟前）",
-                h.valid, (lastMin / 60) % 24, lastMin % 60, h.ageMinutes()));
-        LogBus.log("  最近 12 格: " + tailText(h.recent(BandClient.SLOT_COUNT), 12));
-
-        // 拉到就立刻落盘和刷球，与后面是否判定无关
-        PulseStore.update(h.slots, h.valid, h.lastIndex, h.cur, h.hour, h.minute);
-        PulseStore.save(this);
-        FloatWindow.refresh();
-        return h;
-    }
-
-    /** 建一个带统一帧日志的 BandClient。 */
-    private BandClient newBand() {
-        return new BandClient(this, cfg.addr(), new BandClient.Listener() {
-            @Override
-            public void onHeartRate(int bpm) {
-            }
-
-            @Override
-            public void onFrame(byte[] data) {
-                if (data.length > 0) {
-                    int c = data[0] & 0xFF;
-                    if (c != 0x18 && c != 0x16 && c != 0x1C && c != 0x20 && c != 0x09) {
-                        LogBus.log("  <- " + hex(data));
-                    }
-                }
-            }
-
-            @Override
-            public void onState(String state) {
-            }
-        });
-    }
-
-    /**
-     * 手动拉取：只连表拉一次曲线，不改监测开关、不判定、不锁屏。
-     * 守护在跑时也允许，靠 BLE_LOCK 保证不会同时连两块手环。
-     */
-    private void startFetch() {
-        if (fetchWorker != null && fetchWorker.isAlive()) {
-            LogBus.log("上一次拉取还没结束，忽略本次点击");
-            return;
-        }
-        fetchWorker = new Thread(() -> {
-            acquireWake();
-            try {
-                if (!BLE_LOCK.tryLock()) {
-                    LogBus.log("手环正被守护占用，请稍后再点拉取");
-                    return;
-                }
-                try {
-                    LogBus.log("手动拉取：连接 " + cfg.addr());
-                    BandClient band = newBand();
-                    if (!band.connect(15000)) {
-                        LogBus.log("手动拉取失败：连不上手环");
-                        band.close();
-                        return;
-                    }
-                    // 只发解锁和 18 fa：不改监测开关，不判睡，不锁屏
-                    BandClient.PulseHistory h = fetchAndStore(band);
-                    if (h == null) {
-                        LogBus.log("手动拉取：没拿到曲线");
-                    } else {
-                        LogBus.log("手动拉取完成，界面与悬浮球已更新");
-                    }
-                } finally {
-                    // tryLock 成功后必须释放，否则守护的 cycle 会永远卡在锁上
-                    BLE_LOCK.unlock();
-                }
-            } catch (Throwable t) {
-                LogBus.log("手动拉取异常: " + t.getMessage());
-            } finally {
-                releaseWake();
-                if (!running) {
-                    // 没有守护时才停掉这次独立启动的 Service
-                    stopForeground(true);
-                    stopSelf();
-                } else {
-                    // 守护在同一个 Service 里跑：只把通知还原，别停 Service
-                    updateNotification("守护中，等待下次检测");
-                }
-            }
-        }, "sleep-fetch");
-        fetchWorker.start();
-    }
-
-    /**
-     * 等到目标时刻。期间每 40 秒发一次电量查询当心跳，
-     * 防止空闲太久被手环主动断开（实测空闲 11 分钟必断）。
-     */
-    private void sleepUntil(BandClient band, long targetMs) {
-        while (!stopRequested) {
-            long left = targetMs - System.currentTimeMillis();
-            if (left <= 0) {
-                return;
-            }
-            lastWorkerTick = System.currentTimeMillis();
-            if (!band.isConnected()) {
-                // 连接已经掉了还接着等，只会白等一整轮（实测被冻结后会这样）
-                LogBus.log("等待中连接已断开，提前结束本轮");
-                return;
-            }
-            if (left > 45000L) {
-                sleepMs(40000L);
-                lastWorkerTick = System.currentTimeMillis();
-                band.writeCommand(new byte[]{0x03});
-                lastWorkerTick = System.currentTimeMillis();
-            } else {
-                sleepMs(left);
-            }
-        }
-    }
-
-    /** 以 cur 为基准取最近 n 格，空格（-1）保留在窗口里，避免把两段不连续的数据拼成"持续"。 */
-    private static List<Integer> slotsWindow(int[] slots, int cur, int n) {
-        List<Integer> out = new ArrayList<>();
-        if (slots == null || cur < 0) {
-            return out;
-        }
-        for (int k = n - 1; k >= 0; k--) {
-            int i = BandClient.PulseHistory.slotAt(cur, k);
-            if (i >= 0 && i < slots.length) {
-                out.add(slots[i]);
-            }
-        }
-        return out;
-    }
-
-    private static String tailText(List<Integer> v, int n) {        int from = Math.max(0, v.size() - n);
-        StringBuilder sb = new StringBuilder();
-        for (int i = from; i < v.size(); i++) {
-            if (sb.length() > 0) {
-                sb.append(' ');
-            }
-            sb.append(v.get(i));
-        }
-        return sb.toString();
-    }
-
-    private void sleepMs(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private void sendState(SleepJudge.Result r) {
-        Intent i = new Intent(BC_STATE);
-        i.putExtra("bpm", r.median);
-        i.putExtra("score", r.score);
-        i.putExtra("asleep", r.asleep);
-        i.putExtra("at", System.currentTimeMillis());
-        sendBroadcast(i);
-        writeState(r);
-    }
-
-    private void send(String action, SleepJudge.Result r) {
-        Intent i = new Intent(action);
-        i.putExtra("bpm", r.median);
-        i.putExtra("score", r.score);
-        i.putExtra("at", System.currentTimeMillis());
-        sendBroadcast(i);
-    }
-
-    private void writeState(SleepJudge.Result r) {
-        try {
-            File dir = getExternalFilesDir(null);
-            if (dir == null) {
-                return;
-            }
-            File f = new File(dir, "state.txt");
-            String content = String.format(Locale.US, "%s,%d,%d,%d%n",
-                    r.asleep ? "asleep" : "awake", r.median, r.score, System.currentTimeMillis());
-            FileOutputStream fos = new FileOutputStream(f);
-            fos.write(content.getBytes(StandardCharsets.UTF_8));
-            fos.close();
-        } catch (Throwable ignored) {
         }
     }
 
@@ -580,95 +341,10 @@ public class GuardService extends Service {
         }
     }
 
-    private void acquireWake() {
+    private void stopForegroundCompat() {
         try {
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (pm == null) {
-                return;
-            }
-            if (wakeLock == null) {
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AutoSleeper::guard");
-                wakeLock.setReferenceCounted(false);
-            }
-            if (wakeLock.isHeld()) {
-                wakeLock.release();
-            }
-            // 每个周期重新计时；等待循环里还会持续续期，防止长间隔被 Doze 打断
-            wakeLock.acquire(30 * 60 * 1000L);
+            stopForeground(true);
         } catch (Throwable ignored) {
         }
-    }
-
-    private void releaseWake() {
-        try {
-            if (wakeLock != null && wakeLock.isHeld()) {
-                wakeLock.release();
-            }
-        } catch (Throwable ignored) {
-        }
-        wakeLock = null;
-    }
-
-    private void sleepQuiet(long ms) {
-        long end = System.currentTimeMillis() + ms;
-        while (!stopRequested) {
-            long left = end - System.currentTimeMillis();
-            if (left <= 0) {
-                return;
-            }
-            // 等待期间持续续期，避免长间隔下 WakeLock 到期被 Doze 掐掉
-            keepWake();
-            try {
-                Thread.sleep(Math.min(left, 3000L));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-        }
-    }
-
-    /** WakeLock 续期。间隔大于 15 分钟时，光靠 acquireWake 一次是撑不到下一轮的。 */
-    private void keepWake() {
-        try {
-            if (wakeLock != null && !wakeLock.isHeld()) {
-                wakeLock.acquire(30 * 60 * 1000L);
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void stopGuard() {
-        stopRequested = true;
-        if (worker != null) {
-            worker.interrupt();
-        }
-    }
-
-    @Override
-    public void onDestroy() {
-        stopRequested = true;
-        if (worker != null) {
-            worker.interrupt();
-        }
-        running = false;
-        releaseWake();
-        super.onDestroy();
-    }
-
-    @Nullable
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
-
-    private static String hex(byte[] d) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : d) {
-            if (sb.length() > 0) {
-                sb.append(' ');
-            }
-            sb.append(String.format(Locale.US, "%02x", b & 0xFF));
-        }
-        return sb.toString();
     }
 }
