@@ -436,6 +436,9 @@ public class GuardService extends Service {
                     } else {
                         LogBus.log("手动拉取完成，界面与悬浮球已更新");
                     }
+                } finally {
+                    // tryLock 成功后必须释放，否则守护的 cycle 会永远卡在锁上
+                    BLE_LOCK.unlock();
                 }
             } catch (Throwable t) {
                 LogBus.log("手动拉取异常: " + t.getMessage());
