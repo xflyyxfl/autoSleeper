@@ -63,6 +63,8 @@ public class MainActivity extends AppCompatActivity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     /** 绑定配置期间抑制控件回调，避免 setChecked 触发一次假的用户操作。 */
     private boolean binding;
+    /** 上次渲染过的日志版本；-1 保证首次进入一定渲染。 */
+    private long lastLogVersion = -1L;
 
     private final LogBus.Sink sink = new LogBus.Sink() {
         @Override
@@ -70,17 +72,33 @@ public class MainActivity extends AppCompatActivity {
             ui.post(new Runnable() {
                 @Override
                 public void run() {
-                    tvLog.setText(LogBus.dumpReversed());
-                    tvLog.scrollTo(0, 0);
+                    renderLogIfChanged();
                 }
             });
         }
     };
 
+    /**
+     * 日志有变化才重建文本。
+     *
+     * 进入界面、从后台回到前台、以及每秒轮询都会走到这里，
+     * 不再依赖「下一条日志到达」才刷新。
+     */
+    private void renderLogIfChanged() {
+        long v = LogBus.version();
+        if (v == lastLogVersion) {
+            return;
+        }
+        lastLogVersion = v;
+        tvLog.setText(LogBus.dumpReversed());
+        tvLog.scrollTo(0, 0);
+    }
+
     private final Runnable ticker = new Runnable() {
         @Override
         public void run() {
             refreshStatus();
+            renderLogIfChanged();
             ui.postDelayed(this, REFRESH_MS);
         }
     };
@@ -473,6 +491,8 @@ public class MainActivity extends AppCompatActivity {
         binding = true;
         binder.load();
         binding = false;
+        // 进入界面立刻把已有日志画出来，不必等下一条
+        renderLogIfChanged();
         refreshStatus();
         if (cfg.floatEnabled() && FloatWindow.hasPermission(this)) {
             FloatWindow.show(this);
@@ -486,6 +506,15 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
         LogBus.removeSink(sink);
         ui.removeCallbacks(ticker);
+    }
+
+    /** 从悬浮球点进来时 Activity 可能已在栈中，只走这里不走 onResume，也需要补一次刷新。 */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        renderLogIfChanged();
+        refreshStatus();
     }
 
     private void toast(String s) {

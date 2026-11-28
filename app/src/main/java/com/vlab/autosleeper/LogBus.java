@@ -21,7 +21,14 @@ public final class LogBus {
     private static final CopyOnWriteArrayList<Sink> SINKS = new CopyOnWriteArrayList<>();
     private static final SimpleDateFormat FMT = new SimpleDateFormat("HH:mm:ss", Locale.US);
 
+    /** 每次写入自增。界面靠它判断「有没有新内容」，不必每次重建整段文本。 */
+    private static volatile long version = 0L;
+
     private LogBus() {
+    }
+
+    public static long version() {
+        return version;
     }
 
     public static void addSink(Sink s) {
@@ -47,6 +54,7 @@ public final class LogBus {
             }
         }
         android.util.Log.i("AutoSleeper", line);
+        version++;
         for (Sink s : SINKS) {
             try {
                 s.onLine(line);
@@ -81,5 +89,6 @@ public final class LogBus {
         synchronized (LINES) {
             LINES.clear();
         }
+        version++;
     }
 }
