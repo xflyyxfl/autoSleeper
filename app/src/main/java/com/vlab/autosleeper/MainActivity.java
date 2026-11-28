@@ -304,7 +304,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         int thr = cfg.threshold();
-        chart.setData(PulseStore.snapshot(), PulseStore.lastIndex,
+        chart.setData(PulseStore.snapshot(), PulseStore.lastIndex, PulseStore.cur,
                 PulseStore.hour, PulseStore.minute, thr);
 
         if (!PulseStore.hasData()) {

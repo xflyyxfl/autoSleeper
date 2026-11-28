@@ -39,7 +39,10 @@ public class PulseStore {
     /** 长度 SLOTS，值 30..220，-1 表示空格。 */
     public static volatile int[] slots = emptySlots();
     public static volatile int validCount = 0;
+    /** 最近一个有效格的下标（从 cur 往前找）。 */
     public static volatile int lastIndex = -1;
+    /** 当前时刻对应的格号（0..143）。跨天后必须以它为基准，否则会读到昨天的残留。 */
+    public static volatile int cur = -1;
     public static volatile long updatedAt = 0L;
 
     /** 手表上报的采集时刻。 */
@@ -53,7 +56,7 @@ public class PulseStore {
     public static volatile String note = "";
 
     /** 最近一次写入的原始曲线（仅内存）。 */
-    public static void update(int[] s, int valid, int lastIdx, int h, int m) {
+    public static void update(int[] s, int valid, int lastIdx, int curIdx, int h, int m) {
         if (s == null || s.length == 0) {
             return;
         }
@@ -63,6 +66,7 @@ public class PulseStore {
         slots = copy;
         validCount = valid;
         lastIndex = lastIdx;
+        cur = curIdx;
         hour = h;
         minute = m;
         updatedAt = System.currentTimeMillis();
@@ -115,6 +119,7 @@ public class PulseStore {
             sb.append("#watch=").append(hour).append(':').append(minute)
                     .append(" valid=").append(validCount)
                     .append(" last=").append(lastIndex)
+                    .append(" cur=").append(cur)
                     .append(" saved=").append(System.currentTimeMillis())
                     .append('\n');
             for (int i = 0; i <= lastIndex && i < s.length; i++) {
@@ -154,7 +159,7 @@ public class PulseStore {
             }
 
             int[] arr = emptySlots();
-            int h = -1, m = -1, last = -1, valid = 0;
+            int h = -1, m = -1, last = -1, valid = 0, curIdx = -1;
             long saved = f.lastModified();
 
             BufferedReader br = new BufferedReader(new InputStreamReader(
@@ -175,6 +180,8 @@ public class PulseStore {
                             m = Integer.parseInt(hm[1]);
                         } else if ("last".equals(k)) {
                             last = Integer.parseInt(v);
+                        } else if ("cur".equals(k)) {
+                            curIdx = Integer.parseInt(v);
                         } else if ("valid".equals(k)) {
                             valid = Integer.parseInt(v);
                         } else if ("saved".equals(k)) {
@@ -223,6 +230,7 @@ public class PulseStore {
             slots = arr;
             validCount = valid;
             lastIndex = last;
+            cur = curIdx >= 0 ? curIdx : last;
             hour = h;
             minute = m;
             updatedAt = saved;

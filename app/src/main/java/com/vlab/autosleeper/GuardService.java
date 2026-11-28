@@ -282,7 +282,7 @@ public class GuardService extends Service {
         LogBus.log("  最近 12 格: " + tailText(all, 12));
 
         // 先落盘再判新旧，界面上才能看到曲线
-        PulseStore.update(h.slots, h.valid, h.lastIndex, h.hour, h.minute);
+        PulseStore.update(h.slots, h.valid, h.lastIndex, h.cur, h.hour, h.minute);
         PulseStore.save(this);
 
         if (age > 35) {
@@ -298,7 +298,7 @@ public class GuardService extends Service {
             // 简单阈值：心率低于 M 持续 N 分钟。
             // 按格号取，保证空档也进窗口（有空格就不能算"持续"）
             int need = Math.max(1, cfg.holdMinutes() / BandClient.SLOT_MINUTES);
-            r = simple.feed(slotsWindow(h.slots, h.lastIndex, need));
+            r = simple.feed(slotsWindow(h.slots, h.cur, need));
         } else {
             r = judge.feed(SleepJudge.window(all, cfg.windowSlots()));
             cfg.setBaseline(judge.getBaseline());
@@ -355,15 +355,17 @@ public class GuardService extends Service {
         }
     }
 
-    /** 按格号取最近 n 格，空格（-1）保留在窗口里，避免把两段不连续的数据拼成"持续"。 */
-    private static List<Integer> slotsWindow(int[] slots, int lastIndex, int n) {
+    /** 以 cur 为基准取最近 n 格，空格（-1）保留在窗口里，避免把两段不连续的数据拼成"持续"。 */
+    private static List<Integer> slotsWindow(int[] slots, int cur, int n) {
         List<Integer> out = new ArrayList<>();
-        if (slots == null || lastIndex < 0) {
+        if (slots == null || cur < 0) {
             return out;
         }
-        int from = Math.max(0, lastIndex - n + 1);
-        for (int i = from; i <= lastIndex && i < slots.length; i++) {
-            out.add(slots[i]);
+        for (int k = n - 1; k >= 0; k--) {
+            int i = BandClient.PulseHistory.slotAt(cur, k);
+            if (i >= 0 && i < slots.length) {
+                out.add(slots[i]);
+            }
         }
         return out;
     }

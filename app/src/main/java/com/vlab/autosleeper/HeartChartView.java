@@ -40,6 +40,8 @@ public class HeartChartView extends View {
 
     private int[] slots = new int[0];
     private int lastIndex = -1;
+    /** 当前时刻对应的格号，画曲线以它为右端点。 */
+    private int cur = -1;
     private int hour = -1;
     private int minute = -1;
     private int threshold = 55;
@@ -89,10 +91,11 @@ public class HeartChartView extends View {
         return v * getResources().getDisplayMetrics().scaledDensity;
     }
 
-    /** 喂数据：曲线 + 判定阈值。 */
-    public void setData(int[] s, int lastIdx, int h, int m, int thr) {
+    /** 喂数据：曲线 + 判定阈值。cur 是当前格号，跨天后靠它定位右端点。 */
+    public void setData(int[] s, int lastIdx, int curIdx, int h, int m, int thr) {
         this.slots = s == null ? new int[0] : s;
         this.lastIndex = lastIdx;
+        this.cur = curIdx;
         this.hour = h;
         this.minute = m;
         this.threshold = thr;
@@ -120,16 +123,9 @@ public class HeartChartView extends View {
             return;
         }
 
-        // 取最近 visible 格
-        int from;
-        int count;
-        if (lastIndex >= 0) {
-            count = Math.min(visible, lastIndex + 1);
-            from = lastIndex - count + 1;
-        } else {
-            from = 0;
-            count = Math.min(visible, slots.length);
-        }
+        // 以当前格为右端点，向左取 visible 格；跨 0 点自动回绕到前一天末尾
+        int base = cur >= 0 ? cur : lastIndex;
+        int count = base >= 0 ? Math.min(visible, BandClient.SLOT_COUNT) : 0;
 
         int yMin = 40;
         int yMax = 130;
@@ -165,7 +161,7 @@ public class HeartChartView extends View {
         float lastX = left;
         float lastY = bottom;
         for (int i = 0; i < count; i++) {
-            int idx = from + i;
+            int idx = BandClient.PulseHistory.slotAt(base, count - 1 - i);
             int v = idx < slots.length ? slots[idx] : BandClient.NO_DATA;
             if (v < 30 || v > 220) {
                 started = false;
@@ -193,7 +189,8 @@ public class HeartChartView extends View {
         pText.setTextSize(sp(8));
         for (int k = 0; k <= 3; k++) {
             float x = left + (right - left) * k / 3f;
-            String lab = timeLabel(from + (int) ((count - 1) * k / 3f));
+            String lab = timeLabel(BandClient.PulseHistory.slotAt(
+                    base, count - 1 - (int) ((count - 1) * k / 3f)));
             float tw = pText.measureText(lab);
             float tx = Math.max(left, Math.min(right - tw, x - tw / 2));
             canvas.drawText(lab, tx, h - dp(6), pText);
@@ -205,12 +202,9 @@ public class HeartChartView extends View {
         }
     }
 
-    /** 格号 → 具体时刻。以手环最后上报的采集时间反推。 */
+    /** 格号 → 具体时刻（格号即当天第几个 10 分钟）。 */
     private String timeLabel(int idx) {
-        if (hour < 0 || minute < 0 || lastIndex < 0) {
-            return "";
-        }
-        int totalMin = hour * 60 + minute - (lastIndex - idx) * BandClient.SLOT_MINUTES;
+        int totalMin = idx * BandClient.SLOT_MINUTES;
         totalMin = ((totalMin % 1440) + 1440) % 1440;
         return String.format(Locale.US, "%02d:%02d", totalMin / 60, totalMin % 60);
     }

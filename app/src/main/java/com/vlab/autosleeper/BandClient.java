@@ -87,45 +87,62 @@ public class BandClient {
 
     /** 一次拉取的结果。 */
     public static class PulseHistory {
-        /** 长度 SLOT_COUNT，值 30..220，NO_DATA 表示空格。下标 0 最早、末尾最新。 */
+        /**
+         * 长度 SLOT_COUNT，值 30..220，NO_DATA 表示空格。
+         *
+         * 下标是「当天 00:00 起算的绝对格号」。**手环跨天不会清理昨天的残留**，
+         * 所以凌晨时数组里同时躺着两段：昨天 22:00-24:00 在 132..143，
+         * 今天 00:00 之后在 0..cur。取数据必须用环形，不能简单取"最大的有效下标"。
+         */
         public int[] slots = new int[SLOT_COUNT];
         /** 手表报的采集时间（时、分），失败时 -1。 */
         public int hour = -1;
         public int minute = -1;
         /** 有效格数。 */
         public int valid;
-        /** 最后一条有效值所在的下标，-1 表示全空。 */
+        /** 当前时刻对应的格号（0..143），-1 表示不知道。 */
+        public int cur = -1;
+        /** 最近一个有效格的下标（从 cur 往前找），-1 表示全空。 */
         public int lastIndex = -1;
 
         public boolean ok() {
             return valid > 0;
         }
 
-        /** 取最近 n 个有效值，按时间正序。 */
+        /** 以 cur 为基准往前第 k 格的绝对下标，跨 0 点自动回绕。 */
+        public static int slotAt(int cur, int k) {
+            int i = (cur - k) % SLOT_COUNT;
+            return i < 0 ? i + SLOT_COUNT : i;
+        }
+
+        /** 取最近 n 格里的有效值，按时间正序。跨 0 点自动回绕到前一天末尾。 */
         public java.util.List<Integer> recent(int n) {
             java.util.List<Integer> out = new java.util.ArrayList<>();
-            for (int i = lastIndex; i >= 0 && out.size() < n; i--) {
-                if (slots[i] != NO_DATA) {
-                    out.add(0, slots[i]);
+            int base = cur >= 0 ? cur : lastIndex;
+            if (base < 0) {
+                return out;
+            }
+            for (int k = n - 1; k >= 0; k--) {
+                int v = slots[slotAt(base, k)];
+                if (v != NO_DATA) {
+                    out.add(v);
                 }
             }
             return out;
         }
 
-        /** 最后一次有效采集距今多少分钟。用格号差算，不受当前时刻影响。 */
+        /** 最近一个有效格距今多少分钟。找不到有效值返回 MAX_VALUE。 */
         public int ageMinutes() {
-            if (lastIndex < 0) {
+            int base = cur >= 0 ? cur : lastIndex;
+            if (base < 0) {
                 return Integer.MAX_VALUE;
             }
-            if (hour < 0 || minute < 0) {
-                return 0;   // 没拿到手表时刻，只能当作新鲜
+            for (int k = 0; k < SLOT_COUNT; k++) {
+                if (slots[slotAt(base, k)] != NO_DATA) {
+                    return k * SLOT_MINUTES;
+                }
             }
-            int cur = (hour * 60 + minute) / SLOT_MINUTES;
-            int d = cur - lastIndex;
-            if (d < 0) {
-                d = 0;
-            }
-            return d * SLOT_MINUTES;
+            return Integer.MAX_VALUE;
         }
     }
 
@@ -491,13 +508,29 @@ public class BandClient {
                 } else {
                     h.slots[i] = v;
                     valid++;
-                    h.lastIndex = i;
                 }
             }
             h.valid = valid;
         }
         h.hour = pulseHour;
         h.minute = pulseMinute;
+
+        // 关键：以当前时刻为基准往回找最近的有效格。
+        // 不能直接取"数组里最大的有效下标"——跨天后 132..143 是昨天的残留，
+        // 那样取会一直读到昨天深夜，今天的数据永远看不见。
+        if (pulseHour >= 0 && pulseMinute >= 0) {
+            h.cur = (pulseHour * 60 + pulseMinute) / SLOT_MINUTES;
+            if (h.cur >= SLOT_COUNT) {
+                h.cur = SLOT_COUNT - 1;
+            }
+            for (int k = 0; k < SLOT_COUNT; k++) {
+                int i = PulseHistory.slotAt(h.cur, k);
+                if (h.slots[i] != NO_DATA) {
+                    h.lastIndex = i;
+                    break;
+                }
+            }
+        }
         return h;
     }
 
