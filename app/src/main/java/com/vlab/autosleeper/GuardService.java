@@ -101,6 +101,10 @@ public class GuardService extends Service implements FlowListener {
 
         // 必须同步调用，否则 startForegroundService 之后 5 秒内没转前台会被系统干掉
         startForeground(NOTIF_ID, buildNotification(defaultText(action)));
+        // 进程可能刚被拉起（App 在后台或已被回收），悬浮球要在这里补建，
+        // 否则 Tasks.FetchPulse 里的 refresh() 会因为 view==null 直接返回，
+        // 表现为「手动拉取成功但球上数字不动」。
+        ensureFloatWindow();
 
         if (ACTION_STOP.equals(action)) {
             handleStop();
@@ -178,6 +182,17 @@ public class GuardService extends Service implements FlowListener {
     }
 
     // ------------------------------------------------------------ 指令处理
+
+    /** 勾了悬浮球就保证它存在。已存在时 show() 内部会直接返回。 */
+    private void ensureFloatWindow() {
+        try {
+            if (cfg != null && cfg.floatEnabled()) {
+                FloatWindow.show(this);
+            }
+        } catch (Throwable t) {
+            LogBus.log("悬浮球创建失败: " + t.getMessage());
+        }
+    }
 
     private void handleStop() {
         LogBus.log("收到停止指令");

@@ -91,7 +91,13 @@ public class FloatBallView extends View {
         canvas.drawCircle(cx, cy, r, pRing);
 
         PulseTable table = PulseRepository.current();
-        int base = table.curSlot();
+        // 以「最近一个有效格」为基准，而不是当前格。
+        // 当前格要到下一格才结算，此刻一定是空的；若以它为准，
+        // 球会退回显示上次判定的中位数，手动拉取（不判定）时数字就永远不动。
+        int base = table.lastValidSlot();
+        if (base < 0) {
+            base = table.curSlot();
+        }
 
         // 背景趋势线：只画到圆的中部以上，不盖住数字
         if (!table.isEmpty() && base >= 0) {
@@ -124,7 +130,7 @@ public class FloatBallView extends View {
             }
         }
 
-        // 显示当前格的实际心率；当前格还没写满时退回最近一次判定的中位数
+        // 直接显示最近一格的实测心率；整张表都空时退回上次判定值
         int bpm = table.at(base);
         if (!SlotMath.valid(bpm)) {
             Verdict verdict = PulseRepository.verdict();
