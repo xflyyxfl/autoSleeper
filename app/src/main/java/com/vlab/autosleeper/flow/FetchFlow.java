@@ -3,7 +3,6 @@ package com.vlab.autosleeper.flow;
 import android.content.Context;
 
 import com.vlab.autosleeper.LogBus;
-import com.vlab.autosleeper.band.AbortedException;
 import com.vlab.autosleeper.band.BandException;
 import com.vlab.autosleeper.band.BandSession;
 import com.vlab.autosleeper.data.Config;
@@ -50,9 +49,6 @@ public final class FetchFlow implements Runnable {
                 LogBus.log("手动拉取结果: " + result.code + " " + result.message);
                 listener.onStatus(result.ok() ? "曲线已更新" : "拉取失败：" + result.message);
             }
-        } catch (AbortedException e) {
-            LogBus.log("手动拉取已取消");
-            listener.onStatus("拉取已取消");
         } catch (BandException e) {
             LogBus.log("手动拉取失败: " + e.getMessage());
             listener.onStatus("拉取失败：" + e.getMessage());

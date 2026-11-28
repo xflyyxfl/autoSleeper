@@ -359,6 +359,10 @@ public final class BandSession implements AutoCloseable {
         }
     }
 
+    private void fail(BandError error) {
+        fail(error, null);
+    }
+
     private void fail(BandError error, String detail) {
         if (failError == null) {
             failError = error;
