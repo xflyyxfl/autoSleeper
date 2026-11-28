@@ -295,7 +295,6 @@ public class GuardService extends Service {
         // 先落盘再判新旧，界面上才能看到曲线
         PulseStore.update(h.slots, h.valid, h.lastIndex, h.cur, h.hour, h.minute);
         PulseStore.save(this);
-        FloatWindow.refresh();
 
         if (age > 35) {
             LogBus.log(String.format(Locale.US,
@@ -317,6 +316,8 @@ public class GuardService extends Service {
         }
         PulseStore.setVerdict(r.median, cfg.threshold(), r.asleep, r.note);
         PulseStore.appendVerdict(this, r.median, cfg.threshold(), r.asleep, r.note);
+        // 必须放在 setVerdict 之后：悬浮球显示的就是 median，提前刷新会画成上一轮的值
+        FloatWindow.refresh();
 
         LogBus.log(String.format(Locale.US,
                 "本轮结果: 中位=%d 阈值=%d 得分=%d %s",

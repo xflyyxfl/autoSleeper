@@ -116,11 +116,11 @@ public class FloatBallView extends View {
             }
         }
 
-        int bpm = -1;
-        if (base >= 0 && base < slots.length && slots[base] >= 30) {
+        // 与主界面显示同一个量：判定窗口中位数。
+        // 只有还没判定过时才退回当前格的原始值，避免两处数字对不上。
+        int bpm = PulseStore.median;
+        if (bpm <= 0 && base >= 0 && base < slots.length && slots[base] >= 30) {
             bpm = slots[base];
-        } else if (PulseStore.median > 0) {
-            bpm = PulseStore.median;
         }
         pText.setTextSize(sp(bpm >= 100 ? 11 : 12.5f));
         canvas.drawText(bpm > 0 ? String.valueOf(bpm) : "--",
