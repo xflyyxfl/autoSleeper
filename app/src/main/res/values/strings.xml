@@ -18,5 +18,10 @@
     <string name="label_continuous">连续监测（心率灯常开，更准但费电）</string>
     <string name="label_autolock">判定入睡后自动锁屏</string>
     <string name="label_boot">开机自动恢复守护</string>
+    <string name="label_float">显示悬浮心率球（可拖动）</string>
+    <string name="label_alpha">悬浮球透明度</string>
+    <string name="label_posx">悬浮球水平位置</string>
+    <string name="label_posy">悬浮球垂直位置</string>
+    <string name="btn_overlay">授权悬浮窗</string>
     <string name="status_idle">未运行</string>
 </resources>

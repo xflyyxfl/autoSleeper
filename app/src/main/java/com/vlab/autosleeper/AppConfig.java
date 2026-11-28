@@ -152,6 +152,42 @@ public class AppConfig {
         sp.edit().putBoolean("resumeOnBoot", v).apply();
     }
 
+    // ---------------- 悬浮窗 ----------------
+
+    public boolean floatEnabled() {
+        return sp.getBoolean("floatEnabled", false);
+    }
+
+    public void setFloatEnabled(boolean v) {
+        sp.edit().putBoolean("floatEnabled", v).apply();
+    }
+
+    /** 屏幕位置，用 0..1000 的相对比例，换设备也不会跑到屏幕外。 */
+    public int floatX() {
+        return clamp(sp.getInt("floatX", 880), 0, 1000);
+    }
+
+    public void setFloatX(int v) {
+        sp.edit().putInt("floatX", clamp(v, 0, 1000)).apply();
+    }
+
+    public int floatY() {
+        return clamp(sp.getInt("floatY", 180), 0, 1000);
+    }
+
+    public void setFloatY(int v) {
+        sp.edit().putInt("floatY", clamp(v, 0, 1000)).apply();
+    }
+
+    /** 透明度百分比，20..100。 */
+    public int floatAlpha() {
+        return clamp(sp.getInt("floatAlpha", 85), 20, 100);
+    }
+
+    public void setFloatAlpha(int v) {
+        sp.edit().putInt("floatAlpha", clamp(v, 20, 100)).apply();
+    }
+
     public double baseline() {
         return sp.getFloat("baseline", 0f);
     }

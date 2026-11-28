@@ -172,6 +172,55 @@
             android:layout_height="wrap_content"
             android:text="@string/label_boot" />
 
+        <CheckBox
+            android:id="@+id/cbFloat"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/label_float" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/label_alpha"
+            android:textSize="12sp" />
+
+        <SeekBar
+            android:id="@+id/sbAlpha"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="80" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/label_posx"
+            android:textSize="12sp" />
+
+        <SeekBar
+            android:id="@+id/sbX"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="1000" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/label_posy"
+            android:textSize="12sp" />
+
+        <SeekBar
+            android:id="@+id/sbY"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="1000" />
+
+        <Button
+            android:id="@+id/btnOverlayPerm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_overlay" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

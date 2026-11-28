@@ -17,6 +17,7 @@ import android.provider.Settings;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -42,6 +43,10 @@ public class MainActivity extends AppCompatActivity {
     private CheckBox cbContinuous;
     private CheckBox cbAutoLock;
     private CheckBox cbBoot;
+    private CheckBox cbFloat;
+    private SeekBar sbAlpha;
+    private SeekBar sbX;
+    private SeekBar sbY;
     private TextView tvStatus;
     private TextView tvNow;
     private TextView tvLog;
@@ -76,6 +81,10 @@ public class MainActivity extends AppCompatActivity {
         cbContinuous = findViewById(R.id.cbContinuous);
         cbAutoLock = findViewById(R.id.cbAutoLock);
         cbBoot = findViewById(R.id.cbBoot);
+        cbFloat = findViewById(R.id.cbFloat);
+        sbAlpha = findViewById(R.id.sbAlpha);
+        sbX = findViewById(R.id.sbX);
+        sbY = findViewById(R.id.sbY);
         tvStatus = findViewById(R.id.tvStatus);
         tvNow = findViewById(R.id.tvNow);
         tvLog = findViewById(R.id.tvLog);
@@ -160,6 +169,85 @@ public class MainActivity extends AppCompatActivity {
 
         btnHistory.setOnClickListener(v -> showHistory());
 
+        Button btnOverlayPerm = findViewById(R.id.btnOverlayPerm);
+        btnOverlayPerm.setOnClickListener(v -> {
+            try {
+                startActivity(FloatWindow.requestIntent(this));
+            } catch (Throwable t) {
+                toast("打不开悬浮窗授权页");
+            }
+        });
+
+        cbFloat.setOnCheckedChangeListener((button, checked) -> {
+            if (checked && !FloatWindow.hasPermission(this)) {
+                toast("请先授权悬浮窗");
+                cbFloat.setChecked(false);
+                try {
+                    startActivity(FloatWindow.requestIntent(this));
+                } catch (Throwable ignored) {
+                }
+                return;
+            }
+            cfg.setFloatEnabled(checked);
+            if (checked) {
+                FloatWindow.show(this);
+                toast("悬浮球已显示，拖动可改位置");
+            } else {
+                FloatWindow.hide();
+            }
+        });
+
+        sbAlpha.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                if (!fromUser) return;
+                cfg.setFloatAlpha(p + 20);
+                FloatWindow.apply(MainActivity.this);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+
+        sbX.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                if (!fromUser) return;
+                cfg.setFloatX(p);
+                FloatWindow.apply(MainActivity.this);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+
+        sbY.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                if (!fromUser) return;
+                cfg.setFloatY(p);
+                FloatWindow.apply(MainActivity.this);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+
         ensurePerms();
         refreshStatus();
     }
@@ -173,6 +261,10 @@ public class MainActivity extends AppCompatActivity {
         cbContinuous.setChecked(cfg.measureMode() == 1);
         cbAutoLock.setChecked(cfg.autoLock());
         cbBoot.setChecked(cfg.resumeOnBoot());
+        cbFloat.setChecked(cfg.floatEnabled());
+        sbAlpha.setProgress(cfg.floatAlpha() - 20);
+        sbX.setProgress(cfg.floatX());
+        sbY.setProgress(cfg.floatY());
     }
 
     private boolean saveConfig() {
@@ -189,6 +281,10 @@ public class MainActivity extends AppCompatActivity {
         cfg.setMeasureMode(cbContinuous.isChecked() ? 1 : 0);
         cfg.setAutoLock(cbAutoLock.isChecked());
         cfg.setResumeOnBoot(cbBoot.isChecked());
+        cfg.setFloatEnabled(cbFloat.isChecked());
+        cfg.setFloatAlpha(sbAlpha.getProgress() + 20);
+        cfg.setFloatX(sbX.getProgress());
+        cfg.setFloatY(sbY.getProgress());
         return true;
     }
 
@@ -387,6 +483,10 @@ public class MainActivity extends AppCompatActivity {
         LogBus.addSink(sink);
         loadConfig();
         refreshStatus();
+        // 从系统授权页返回时，如果用户已经勾选过，直接把球显示出来
+        if (cfg.floatEnabled() && FloatWindow.hasPermission(this)) {
+            FloatWindow.show(this);
+        }
         ui.postDelayed(new Runnable() {
             @Override
             public void run() {

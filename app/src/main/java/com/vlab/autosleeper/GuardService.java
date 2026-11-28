@@ -81,6 +81,8 @@ public class GuardService extends Service {
         String act = intent == null ? null : intent.getAction();
         if (ACTION_STOP.equals(act)) {
             LogBus.log("收到停止指令");
+            FloatWindow.hide();
+            AlarmWatchdog.cancel(this);
             stopGuard();
             return START_NOT_STICKY;
         }
@@ -94,6 +96,13 @@ public class GuardService extends Service {
             return START_STICKY;
         }
         startWorker(once);
+        if (!once) {
+            // 看门狗：即使进程被杀，Doze 下也能按点把守护拉回来
+            AlarmWatchdog.scheduleNext(this);
+        }
+        if (cfg.floatEnabled()) {
+            FloatWindow.show(this);
+        }
         return once ? START_NOT_STICKY : START_STICKY;
     }
 
@@ -284,6 +293,7 @@ public class GuardService extends Service {
         // 先落盘再判新旧，界面上才能看到曲线
         PulseStore.update(h.slots, h.valid, h.lastIndex, h.cur, h.hour, h.minute);
         PulseStore.save(this);
+        FloatWindow.refresh();
 
         if (age > 35) {
             LogBus.log(String.format(Locale.US,
