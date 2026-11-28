@@ -59,6 +59,7 @@ public class GuardService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        CrashHandler.install(this);
         cfg = new AppConfig(this);
         nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         createChannel();
@@ -100,7 +101,8 @@ public class GuardService extends Service {
             // 看门狗：即使进程被杀，Doze 下也能按点把守护拉回来
             AlarmWatchdog.scheduleNext(this);
         }
-        if (cfg.floatEnabled()) {
+        // 单次测量几秒就结束，不挂悬浮球，避免服务退出时窗口状态残留
+        if (cfg.floatEnabled() && !once) {
             FloatWindow.show(this);
         }
         return once ? START_NOT_STICKY : START_STICKY;

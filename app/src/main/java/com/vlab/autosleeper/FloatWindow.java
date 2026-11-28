@@ -45,7 +45,7 @@ public class FloatWindow {
         if (wm == null) {
             return;
         }
-        ballSize = Math.round(c.getResources().getDisplayMetrics().density * 96);
+        ballSize = Math.round(c.getResources().getDisplayMetrics().density * 48);
         view = new FloatBallView(c);
 
         lp = new WindowManager.LayoutParams(
@@ -145,12 +145,18 @@ public class FloatWindow {
             wm.updateViewLayout(view, lp);
         } catch (Throwable ignored) {
         }
-        view.refresh();
+        try {
+            view.refresh();
+        } catch (Throwable ignored) {
+        }
     }
 
     public static synchronized void refresh() {
-        if (view != null) {
-            view.refresh();
+        try {
+            if (view != null) {
+                view.refresh();
+            }
+        } catch (Throwable ignored) {
         }
     }
 
