@@ -65,6 +65,18 @@ public final class LogBus {
         return sb.toString();
     }
 
+    /** 倒序输出：最新的在最上面，给界面用。 */
+    public static String dumpReversed() {
+        StringBuilder sb = new StringBuilder();
+        synchronized (LINES) {
+            java.util.Iterator<String> it = LINES.descendingIterator();
+            while (it.hasNext()) {
+                sb.append(it.next()).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
     public static void clear() {
         synchronized (LINES) {
             LINES.clear();

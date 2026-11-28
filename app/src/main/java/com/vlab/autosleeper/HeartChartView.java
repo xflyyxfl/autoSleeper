@@ -37,6 +37,9 @@ public class HeartChartView extends View {
     private final Paint pDot = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pThr = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
+    /** 每个有效点的坐标，画完线再统一画圆点。 */
+    private final java.util.ArrayList<Float> px = new java.util.ArrayList<>();
+    private final java.util.ArrayList<Float> py = new java.util.ArrayList<>();
 
     private int[] slots = new int[0];
     private int lastIndex = -1;
@@ -69,7 +72,7 @@ public class HeartChartView extends View {
         pText.setTextSize(sp(9));
 
         pLine.setColor(LINE);
-        pLine.setStrokeWidth(dp(1.8f));
+        pLine.setStrokeWidth(dp(1f));
         pLine.setStyle(Paint.Style.STROKE);
         pLine.setStrokeJoin(Paint.Join.ROUND);
         pLine.setStrokeCap(Paint.Cap.ROUND);
@@ -155,11 +158,11 @@ public class HeartChartView extends View {
             canvas.drawText(threshold + " 阈值", right - dp(46), yt - dp(3), pText);
         }
 
-        // 折线
+        // 折线：细线 + 每个有效格一个点
         path.reset();
+        px.clear();
+        py.clear();
         boolean started = false;
-        float lastX = left;
-        float lastY = bottom;
         for (int i = 0; i < count; i++) {
             int idx = BandClient.PulseHistory.slotAt(base, count - 1 - i);
             int v = idx < slots.length ? slots[idx] : BandClient.NO_DATA;
@@ -175,25 +178,31 @@ public class HeartChartView extends View {
                 path.moveTo(x, y);
                 started = true;
             }
-            lastX = x;
-            lastY = y;
+            px.add(x);
+            py.add(y);
         }
         canvas.drawPath(path, pLine);
-
-        // 最新一点画个实心圆
-        if (started) {
-            canvas.drawCircle(lastX, lastY, dp(2.6f), pDot);
+        for (int i = 0; i < px.size(); i++) {
+            canvas.drawCircle(px.get(i), py.get(i), dp(1.7f), pDot);
         }
 
-        // 底部时间刻度（4 个）
+        // 底部刻度：每 30 分钟（3 格）一根线；标签放不下就自动按 1h / 2h 稀疏
         pText.setTextSize(sp(8));
-        for (int k = 0; k <= 3; k++) {
-            float x = left + (right - left) * k / 3f;
-            String lab = timeLabel(BandClient.PulseHistory.slotAt(
-                    base, count - 1 - (int) ((count - 1) * k / 3f)));
-            float tw = pText.measureText(lab);
-            float tx = Math.max(left, Math.min(right - tw, x - tw / 2));
-            canvas.drawText(lab, tx, h - dp(6), pText);
+        int tickStep = 3;
+        int labelStep = tickStep;
+        while (stepX * labelStep < dp(38) && labelStep < count) {
+            labelStep += tickStep;
+        }
+        for (int i = count - 1; i >= 0; i -= tickStep) {
+            float x = left + stepX * i;
+            canvas.drawLine(x, bottom, x, bottom + dp(3), pGrid);
+            int back = count - 1 - i;
+            if (back % labelStep == 0) {
+                String lab = timeLabel(BandClient.PulseHistory.slotAt(base, back));
+                float tw = pText.measureText(lab);
+                float tx = Math.max(left, Math.min(right - tw, x - tw / 2));
+                canvas.drawText(lab, tx, h - dp(6), pText);
+            }
         }
 
         if (footer != null && footer.length() > 0) {

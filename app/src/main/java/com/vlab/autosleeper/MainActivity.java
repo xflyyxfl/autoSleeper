@@ -86,7 +86,7 @@ public class MainActivity extends AppCompatActivity {
         loadConfig();
         // 服务没在跑的时候，界面也能显示上次落盘的曲线
         PulseStore.load(this);
-        tvLog.setText(LogBus.dump());
+        tvLog.setText(LogBus.dumpReversed());
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
@@ -288,11 +288,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void appendLog(String line) {
-        tvLog.append(line);
-        tvLog.append("\n");
-        if (tvLog.getLineCount() > 500) {
-            tvLog.setText(LogBus.dump());
-        }
+        // 倒序：最新的日志显示在最上面，整块重设一次
+        tvLog.setText(LogBus.dumpReversed());
+        tvLog.scrollTo(0, 0);
     }
 
     private void refreshStatus() {
