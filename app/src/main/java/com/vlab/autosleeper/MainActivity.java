@@ -101,6 +101,7 @@ public class MainActivity extends AppCompatActivity {
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
         Button btnTest = findViewById(R.id.btnTest);
+        Button btnFetch = findViewById(R.id.btnFetch);
         Button btnLock = findViewById(R.id.btnLock);
         Button btnAdmin = findViewById(R.id.btnAdmin);
         Button btnPair = findViewById(R.id.btnPair);
@@ -145,6 +146,22 @@ public class MainActivity extends AppCompatActivity {
                 startService(i);
             }
             toast("开始单次测量");
+        });
+
+        btnFetch.setOnClickListener(v -> {
+            if (!hasBlePerms()) {
+                ensurePerms();
+                toast("缺少蓝牙权限，请授权后重试");
+                return;
+            }
+            Intent i = new Intent(this, GuardService.class);
+            i.setAction(GuardService.ACTION_FETCH);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+            toast("正在拉取心率数据");
         });
 
         btnLock.setOnClickListener(v -> {

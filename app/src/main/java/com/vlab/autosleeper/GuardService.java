@@ -35,6 +35,8 @@ public class GuardService extends Service {
     public static final String ACTION_START = "com.vlab.autosleeper.action.START";
     public static final String ACTION_STOP = "com.vlab.autosleeper.action.STOP";
     public static final String ACTION_ONCE = "com.vlab.autosleeper.action.ONCE";
+    /** 只拉一次曲线并更新显示，不开灯、不判定、不锁屏。 */
+    public static final String ACTION_FETCH = "com.vlab.autosleeper.action.FETCH";
     /** 看门狗检测到采样线程卡死时发出的强制重启指令。 */
     public static final String ACTION_RESTART = "com.vlab.autosleeper.action.RESTART";
 
@@ -53,6 +55,10 @@ public class GuardService extends Service {
     private SleepJudge judge;
     private ThresholdJudge simple;
     private Thread worker;
+    private Thread fetchWorker;
+    /** BLE 是单连接：守护与手动拉取必须互斥。守护持有较久，手动点不到就立即提示重试。 */
+    private static final java.util.concurrent.locks.ReentrantLock BLE_LOCK =
+            new java.util.concurrent.locks.ReentrantLock();
     private PowerManager.WakeLock wakeLock;
     private volatile boolean stopRequested = false;
     private volatile boolean notifiedAsleep = false;
@@ -89,6 +95,12 @@ public class GuardService extends Service {
             FloatWindow.hide();
             AlarmWatchdog.cancel(this);
             stopGuard();
+            return START_NOT_STICKY;
+        }
+        if (ACTION_FETCH.equals(act)) {
+            // 纯拉取，与守护互不影响（靠 BLE_LOCK 互斥）
+            startForeground(NOTIF_ID, buildNotification("拉取心率中…"));
+            startFetch();
             return START_NOT_STICKY;
         }
         if (ACTION_RESTART.equals(act)) {
@@ -215,26 +227,17 @@ public class GuardService extends Service {
     private void cycle(long boundary) {
         acquireWake();
         lastWorkerTick = System.currentTimeMillis();
-        BandClient band = new BandClient(this, cfg.addr(), new BandClient.Listener() {
-            @Override
-            public void onHeartRate(int bpm) {
-            }
+        BLE_LOCK.lock();
+        try {
+            doCycle(boundary);
+        } finally {
+            BLE_LOCK.unlock();
+        }
+        releaseWake();
+    }
 
-            @Override
-            public void onFrame(byte[] data) {
-                // 0x18 曲线、0x09 活动心跳、0x1c 握手、0x20 认证都属正常流量
-                if (data.length > 0) {
-                    int c = data[0] & 0xFF;
-                    if (c != 0x18 && c != 0x16 && c != 0x1C && c != 0x20 && c != 0x09) {
-                        LogBus.log("  <- " + hex(data));
-                    }
-                }
-            }
-
-            @Override
-            public void onState(String state) {
-            }
-        });
+    private void doCycle(long boundary) {
+        BandClient band = newBand();
 
         LogBus.log("连接 " + cfg.addr());
         if (!band.connect(15000)) {
@@ -277,45 +280,14 @@ public class GuardService extends Service {
         }
 
         updateNotification("读取心率曲线…");
-        BandClient.PulseHistory h = band.fetchPulseHistory(12000);
+        BandClient.PulseHistory h = fetchAndStore(band);
 
-        // 连着几轮都拿不到新格子时，把手环的监测开关重置一次。
-        // 固件偶尔会卡在"关了就不再开"的状态，重发一遍 18 02/18 01 能救回来。
-        if (h.ok() && h.ageMinutes() > 35) {
-            staleRounds++;
-            if (staleRounds >= 3) {
-                LogBus.log("连续 " + staleRounds + " 轮没有新数据，重置心率监测开关");
-                band.setHeartRateMonitor(false);
-                sleepMs(300);
-                band.setHeartRateMonitor(true);
-                sleepMs(800);
-                band.setHeartRateMonitor(false);
-                staleRounds = 0;
-            }
-        } else if (h.ok()) {
-            staleRounds = 0;
-        }
-        band.close();
-
-        if (!h.ok()) {
-            LogBus.log("没拿到曲线：手环可能没戴，或本格没积累到足够采样");
+        if (h == null) {
             return;
         }
 
         int age = h.ageMinutes();
-        int lastMin = h.lastIndex * BandClient.SLOT_MINUTES;
-        LogBus.log(String.format(Locale.US,
-                "曲线 %d 格有效，最后一格是 %02d:%02d（%d 分钟前）",
-                h.valid, (lastMin / 60) % 24, lastMin % 60, age));
-
         List<Integer> all = h.recent(BandClient.SLOT_COUNT);
-        LogBus.log("  最近 12 格: " + tailText(all, 12));
-
-        // 拉到曲线就立刻刷新悬浮球，不管后面判定走哪条分支（包括"数据太旧"提前 return）。
-        // 球显示的是最后一格心率，与判定无关。
-        PulseStore.update(h.slots, h.valid, h.lastIndex, h.cur, h.hour, h.minute);
-        PulseStore.save(this);
-        FloatWindow.refresh();
 
         if (age > 35) {
             LogBus.log(String.format(Locale.US,
@@ -363,6 +335,123 @@ public class GuardService extends Service {
             send(BC_AWAKE, r);
             LogBus.log(">>> 已清醒，广播 AWAKE");
         }
+    }
+
+    /**
+     * 所有拉取心率数据的唯一入口：发 18 fa → 日志 → 落盘 → 刷新悬浮球。
+     * 守护周期、单次测量、手动「拉取心率」都走这里。
+     *
+     * 返回 null 表示没拿到曲线；调用方自行决定是否判定。
+     */
+    private BandClient.PulseHistory fetchAndStore(BandClient band) {
+        updateNotification("读取心率曲线…");
+        BandClient.PulseHistory h = band.fetchPulseHistory(12000);
+
+        // 连着几轮都拿不到新格子时重置监测开关（固件偶尔卡在"关了不再开"）
+        if (h.ok() && h.ageMinutes() > 35) {
+            staleRounds++;
+            if (staleRounds >= 3) {
+                LogBus.log("连续 " + staleRounds + " 轮没有新数据，重置心率监测开关");
+                band.setHeartRateMonitor(false);
+                sleepMs(300);
+                band.setHeartRateMonitor(true);
+                sleepMs(800);
+                band.setHeartRateMonitor(false);
+                staleRounds = 0;
+            }
+        } else if (h.ok()) {
+            staleRounds = 0;
+        }
+        band.close();
+
+        if (!h.ok()) {
+            LogBus.log("没拿到曲线：手环可能没戴，或本格没积累到足够采样");
+            return null;
+        }
+
+        int lastMin = h.lastIndex * BandClient.SLOT_MINUTES;
+        LogBus.log(String.format(Locale.US,
+                "曲线 %d 格有效，最后一格是 %02d:%02d（%d 分钟前）",
+                h.valid, (lastMin / 60) % 24, lastMin % 60, h.ageMinutes()));
+        LogBus.log("  最近 12 格: " + tailText(h.recent(BandClient.SLOT_COUNT), 12));
+
+        // 拉到就立刻落盘和刷球，与后面是否判定无关
+        PulseStore.update(h.slots, h.valid, h.lastIndex, h.cur, h.hour, h.minute);
+        PulseStore.save(this);
+        FloatWindow.refresh();
+        return h;
+    }
+
+    /** 建一个带统一帧日志的 BandClient。 */
+    private BandClient newBand() {
+        return new BandClient(this, cfg.addr(), new BandClient.Listener() {
+            @Override
+            public void onHeartRate(int bpm) {
+            }
+
+            @Override
+            public void onFrame(byte[] data) {
+                if (data.length > 0) {
+                    int c = data[0] & 0xFF;
+                    if (c != 0x18 && c != 0x16 && c != 0x1C && c != 0x20 && c != 0x09) {
+                        LogBus.log("  <- " + hex(data));
+                    }
+                }
+            }
+
+            @Override
+            public void onState(String state) {
+            }
+        });
+    }
+
+    /**
+     * 手动拉取：只连表拉一次曲线，不改监测开关、不判定、不锁屏。
+     * 守护在跑时也允许，靠 BLE_LOCK 保证不会同时连两块手环。
+     */
+    private void startFetch() {
+        if (fetchWorker != null && fetchWorker.isAlive()) {
+            LogBus.log("上一次拉取还没结束，忽略本次点击");
+            return;
+        }
+        fetchWorker = new Thread(() -> {
+            acquireWake();
+            try {
+                if (!BLE_LOCK.tryLock()) {
+                    LogBus.log("手环正被守护占用，请稍后再点拉取");
+                    return;
+                }
+                try {
+                    LogBus.log("手动拉取：连接 " + cfg.addr());
+                    BandClient band = newBand();
+                    if (!band.connect(15000)) {
+                        LogBus.log("手动拉取失败：连不上手环");
+                        band.close();
+                        return;
+                    }
+                    // 只发解锁和 18 fa：不改监测开关，不判睡，不锁屏
+                    BandClient.PulseHistory h = fetchAndStore(band);
+                    if (h == null) {
+                        LogBus.log("手动拉取：没拿到曲线");
+                    } else {
+                        LogBus.log("手动拉取完成，界面与悬浮球已更新");
+                    }
+                }
+            } catch (Throwable t) {
+                LogBus.log("手动拉取异常: " + t.getMessage());
+            } finally {
+                releaseWake();
+                if (!running) {
+                    // 没有守护时才停掉这次独立启动的 Service
+                    stopForeground(true);
+                    stopSelf();
+                } else {
+                    // 守护在同一个 Service 里跑：只把通知还原，别停 Service
+                    updateNotification("守护中，等待下次检测");
+                }
+            }
+        }, "sleep-fetch");
+        fetchWorker.start();
     }
 
     /**

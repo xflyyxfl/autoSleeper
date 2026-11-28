@@ -4,6 +4,7 @@
     <string name="btn_start">开始守护</string>
     <string name="btn_stop">停止守护</string>
     <string name="btn_test">立即测一次</string>
+    <string name="btn_fetch">拉取心率</string>
     <string name="btn_pair">系统配对</string>
     <string name="btn_clear">清空日志</string>
     <string name="btn_lock_now">立即锁屏</string>
