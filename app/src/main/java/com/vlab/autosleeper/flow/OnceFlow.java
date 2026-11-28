@@ -92,9 +92,6 @@ public final class OnceFlow implements Runnable {
                 LogBus.log("单次测量结果: " + result.code + " " + result.message);
                 listener.onStatus("单次测量完成：" + result.message);
             }
-        } catch (AbortedException e) {
-            LogBus.log("单次测量已取消");
-            listener.onStatus("单次测量已取消");
         } catch (BandException e) {
             LogBus.log("单次测量失败: " + e.getMessage());
             listener.onStatus("单次测量失败：" + e.getMessage());
