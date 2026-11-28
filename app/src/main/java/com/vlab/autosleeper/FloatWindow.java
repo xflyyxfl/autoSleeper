@@ -156,11 +156,27 @@ public class FloatWindow {
         }
     }
 
+    /**
+     * 刷新悬浮球。
+     *
+     * 会被 BLE 后台线程调用，所以这里必须 post 到主线程再 invalidate：
+     * 直接在后台线程碰 View 会撞 CalledFromWrongThread（国产 ROM 上尤其容易）。
+     */
     public static synchronized void refresh() {
+        final FloatBallView target = view;
+        if (target == null) {
+            return;
+        }
         try {
-            if (view != null) {
-                view.refresh();
-            }
+            target.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        target.refresh();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
         } catch (Throwable ignored) {
         }
     }
