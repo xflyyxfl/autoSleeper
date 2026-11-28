@@ -116,11 +116,13 @@ public class FloatBallView extends View {
             }
         }
 
-        // 与主界面显示同一个量：判定窗口中位数。
-        // 只有还没判定过时才退回当前格的原始值，避免两处数字对不上。
-        int bpm = PulseStore.median;
-        if (bpm <= 0 && base >= 0 && base < slots.length && slots[base] >= 30) {
+        // 显示最后一格的实际心率：不管数据来自守护还是单次测量，
+        // 只要拉到新曲线就更新。判定中位数另在主界面显示，不是这个球的任务。
+        int bpm = -1;
+        if (base >= 0 && base < slots.length && slots[base] >= 30) {
             bpm = slots[base];
+        } else if (PulseStore.median > 0) {
+            bpm = PulseStore.median;
         }
         pText.setTextSize(sp(bpm >= 100 ? 11 : 12.5f));
         canvas.drawText(bpm > 0 ? String.valueOf(bpm) : "--",

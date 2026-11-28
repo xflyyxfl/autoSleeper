@@ -117,8 +117,9 @@ public class GuardService extends Service {
             // 看门狗：即使进程被杀，Doze 下也能按点把守护拉回来
             AlarmWatchdog.scheduleNext(this);
         }
-        // 单次测量几秒就结束，不挂悬浮球，避免服务退出时窗口状态残留
-        if (cfg.floatEnabled() && !once) {
+        // 单次测量也显示球：只要拉到了新曲线就更新，
+        // View 已改用 applicationContext，Service 退出不会让窗口失效
+        if (cfg.floatEnabled()) {
             FloatWindow.show(this);
         }
         return once ? START_NOT_STICKY : START_STICKY;
@@ -310,9 +311,11 @@ public class GuardService extends Service {
         List<Integer> all = h.recent(BandClient.SLOT_COUNT);
         LogBus.log("  最近 12 格: " + tailText(all, 12));
 
-        // 先落盘再判新旧，界面上才能看到曲线
+        // 拉到曲线就立刻刷新悬浮球，不管后面判定走哪条分支（包括"数据太旧"提前 return）。
+        // 球显示的是最后一格心率，与判定无关。
         PulseStore.update(h.slots, h.valid, h.lastIndex, h.cur, h.hour, h.minute);
         PulseStore.save(this);
+        FloatWindow.refresh();
 
         if (age > 35) {
             LogBus.log(String.format(Locale.US,
@@ -334,7 +337,7 @@ public class GuardService extends Service {
         }
         PulseStore.setVerdict(r.median, cfg.threshold(), r.asleep, r.note);
         PulseStore.appendVerdict(this, r.median, cfg.threshold(), r.asleep, r.note);
-        // 必须放在 setVerdict 之后：悬浮球显示的就是 median，提前刷新会画成上一轮的值
+        // 判定状态（已判睡）变了，再刷一次球上的状态文字
         FloatWindow.refresh();
 
         LogBus.log(String.format(Locale.US,

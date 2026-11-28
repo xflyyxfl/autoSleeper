@@ -40,13 +40,16 @@ public class FloatWindow {
         if (view != null || !hasPermission(c)) {
             return;
         }
-        cfg = new AppConfig(c);
-        wm = (WindowManager) c.getApplicationContext().getSystemService(Service.WINDOW_SERVICE);
+        Context app = c.getApplicationContext();
+        cfg = new AppConfig(app);
+        wm = (WindowManager) app.getSystemService(Service.WINDOW_SERVICE);
         if (wm == null) {
             return;
         }
-        ballSize = Math.round(c.getResources().getDisplayMetrics().density * 48);
-        view = new FloatBallView(c);
+        ballSize = Math.round(app.getResources().getDisplayMetrics().density * 48);
+        // 必须用 applicationContext：单次测量几秒后 Service 就 stopSelf，
+        // 若 View 持有 Service，窗口残留会导致后续刷新/点击时崩溃
+        view = new FloatBallView(app);
 
         lp = new WindowManager.LayoutParams(
                 ballSize, ballSize,
